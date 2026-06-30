@@ -1402,6 +1402,12 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       if (sourceErr == null && targetErr == null) {
         _cancelTransfer();
         _showBanner('调货成功: ${sourceResult.storeName} → ${targetResult.storeName} ($qty件)');
+        OperationLogService.add(
+          store: '${sourceResult.storeName} → ${targetResult.storeName}',
+          action: '调货',
+          barcode: barcode,
+          detail: '调出 $qty 件',
+        );
         _query(barcode);
       } else {
         // 有失败 → 弹窗 + 可分享
