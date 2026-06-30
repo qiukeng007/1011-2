@@ -1,0 +1,49 @@
+name: pospal_stock_app
+description: 银豹多店库存查询 - Android App
+publish_to: 'none'
+version: 1.0.9+9
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # HTTP 客户端
+  http: ^1.2.0
+  # Cookie 管理
+  cookie_jar: ^4.0.0
+  # 本地存储（配置）
+  shared_preferences: ^2.2.0
+  # 加密存储（密码）
+  flutter_secure_storage: ^9.0.0
+  # 条码扫描
+  mobile_scanner: ^7.0.0
+  # 图片选择（补货拍照）
+  image_picker: ^1.0.0
+  # 图片裁剪 + 条码渲染（纯 Dart，无原生依赖）
+  image: ^3.3.0
+  # 条码生成（规范编码）
+  barcode: ^2.2.0
+  # 打开 URL（浏览器下载）
+  url_launcher: ^6.2.0
+  # 获取 APP 版本号
+  package_info_plus: ^8.0.0
+  # 文件路径
+  path_provider: ^2.1.0
+  # 文件分享
+  share_plus: ^9.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Arial
+      fonts:
+        - asset: assets/fonts/arial.ttf
+        - asset: assets/fonts/arialbd.ttf
+          weight: 700
