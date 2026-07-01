@@ -1,28 +1,48 @@
-name: iOS Build v1.0.8
+name: iOS Auto Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
+    
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      
+      - name: 设置 Flutter
+        uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-      - run: flutter pub get
-      - run: flutter build ipa --release --no-codesign
-      - run: ls -la build/ios/ipa/ || echo "ipa dir not found"
-      - uses: actions/upload-artifact@v4
+          cache: false
+          
+      - name: 清理并获取依赖
+        run: |
+          flutter clean
+          flutter pub get
+        
+      - name: Build Standard iOS Payload
+        # 先往 Flutter 的配置文件里硬写入“不签名”参数，再执行干净的打包命令
+        run: |
+          mkdir -p ios/Flutter
+          echo "CODE_SIGNING_ALLOWED=NO" >> ios/Flutter/Generated.xcconfig
+          echo "CODE_SIGNING_REQUIRED=NO" >> ios/Flutter/Generated.xcconfig
+          echo "CODE_SIGN_IDENTITY=" >> ios/Flutter/Generated.xcconfig
+          echo "PROVISIONING_PROFILE=" >> ios/Flutter/Generated.xcconfig
+          
+          flutter build ios --release --no-codesign
+        
+      - name: Zip Runner App
+        run: |
+          mkdir -p final_zip/Payload
+          cp -r build/ios/iphoneos/Runner.app final_zip/Payload/
+          cd final_zip
+          zip -r -1 ready-to-sign.ipa Payload
+        
+      - name: Upload Configured Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: cash-carry-v1.0.8-ios
-          path: |
-            build/ios/ipa/*.ipa
-            build/ios/ipa/*.xcarchive
-
+          name: ios-release-app
+          path: final_zip/ready-to-sign.ipa
