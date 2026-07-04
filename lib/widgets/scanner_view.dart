@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-/// 扫码器 — 数字变焦 + scanWindow 缩小检测区
+/// 扫码器 — 实时扫码 + 图片导入识别
 class ScannerView extends StatefulWidget {
   final void Function(String barcode) onDetect;
   final VoidCallback onClose;
@@ -25,6 +26,7 @@ class _ScannerViewState extends State<ScannerView>
     returnImage: false,
   );
   bool _hasDetected = false;
+  bool _analyzing = false;
   late final AnimationController _lineCtrl;
   late final Animation<double> _lineAnim;
 
@@ -47,10 +49,61 @@ class _ScannerViewState extends State<ScannerView>
 
   void _onDetect(BarcodeCapture capture) {
     if (_hasDetected) return;
-    final value = capture.barcodes.firstOrNull?.rawValue;
+    final barcode = capture.barcodes.firstOrNull;
+    if (barcode == null) return;
+    // 跳过二维码，只识别条码
+    if (barcode.format == BarcodeFormat.qrCode ||
+        barcode.format == BarcodeFormat.aztec ||
+        barcode.format == BarcodeFormat.dataMatrix) return;
+    final value = barcode.rawValue;
     if (value == null || value.isEmpty || value.length < 6) return;
     _hasDetected = true;
     widget.onDetect(value);
+  }
+
+  Future<void> _pickImage() async {
+    if (_analyzing) return;
+    final picker = ImagePicker();
+    final xfile = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 100,
+    );
+    if (xfile == null || !mounted) return;
+
+    setState(() => _analyzing = true);
+    try {
+      final capture = await _controller.analyzeImage(xfile.path);
+      if (!mounted) return;
+      if (capture != null) {
+        for (final barcode in capture.barcodes) {
+          if (barcode.format == BarcodeFormat.qrCode ||
+              barcode.format == BarcodeFormat.aztec ||
+              barcode.format == BarcodeFormat.dataMatrix) continue;
+          final value = barcode.rawValue;
+          if (value != null && value.isNotEmpty && value.length >= 6) {
+            _hasDetected = true;
+            widget.onDetect(value);
+            return;
+          }
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('未识别到条码，请拍摄清晰的条码照片'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('图片识别失败'), duration: Duration(seconds: 2)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _analyzing = false);
+    }
   }
 
   @override
@@ -78,6 +131,13 @@ class _ScannerViewState extends State<ScannerView>
           icon: const Icon(Icons.close),
           onPressed: widget.onClose,
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.photo_library_outlined),
+            tooltip: '从相册识别条码',
+            onPressed: _analyzing ? null : _pickImage,
+          ),
+        ],
       ),
       body: Stack(
         children: [
@@ -111,6 +171,19 @@ class _ScannerViewState extends State<ScannerView>
               ),
             ),
           ),
+          // 图片识别中遮罩
+          if (_analyzing)
+            Container(
+              color: Colors.black54,
+              child: const Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  CircularProgressIndicator(color: Colors.white),
+                  SizedBox(height: 16),
+                  Text('正在识别图片中的条码…',
+                      style: TextStyle(color: Colors.white, fontSize: 15)),
+                ]),
+              ),
+            ),
         ],
       ),
     );
