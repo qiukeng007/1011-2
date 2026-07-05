@@ -713,6 +713,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   restockService: _restockService!,
                   prefillData: _prefillData,
                   onPrefillConsumed: () => setState(() => _prefillData = null),
+                  queryService: _queryService,
+                  configs: _configs,
                   onSubmitted: () {
                     _pageController.animateToPage(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
                     setState(() {

@@ -959,6 +959,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         supplier: firstData?.supplier ?? '',
         productName: firstData?.name ?? '',
         specification: firstData?.specification ?? '',
+        buyPrice: firstData?.buyPrice,
+        sellPrice: firstData?.sellPrice,
       ));
     }
   }

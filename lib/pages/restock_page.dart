@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -9,7 +10,10 @@ import '../widgets/crop_page.dart';
 import '../models/restock_prefill_data.dart';
 import '../models/store_config.dart';
 import '../services/restock_service.dart';
+import '../services/query_service.dart';
+import '../services/session_manager.dart';
 import '../services/operation_log_service.dart';
+import '../models/product_result.dart';
 import '../utils/constants.dart';
 import '../widgets/barcode_icon.dart';
 import '../widgets/scanner_view.dart';
@@ -21,6 +25,8 @@ class RestockPage extends StatefulWidget {
   final VoidCallback? onPrefillConsumed;
   final VoidCallback? onSubmitted;
   final PageController? pageController;
+  final QueryService? queryService;
+  final List<StoreConfig>? configs;
 
   const RestockPage({
     super.key,
@@ -29,6 +35,8 @@ class RestockPage extends StatefulWidget {
     this.onPrefillConsumed,
     this.onSubmitted,
     this.pageController,
+    this.queryService,
+    this.configs,
   });
 
   @override
@@ -163,6 +171,8 @@ class _RestockPageState extends State<RestockPage>
                 prefillData: widget.prefillData,
                 onPrefillConsumed: widget.onPrefillConsumed,
                 onSubmitted: widget.onSubmitted,
+                queryService: widget.queryService,
+                configs: widget.configs,
               ),
               _BookingForm(
                 service: widget.restockService,
@@ -186,11 +196,15 @@ class _ReplenishForm extends StatefulWidget {
   final RestockPrefillData? prefillData;
   final VoidCallback? onPrefillConsumed;
   final VoidCallback? onSubmitted;
+  final QueryService? queryService;
+  final List<StoreConfig>? configs;
   const _ReplenishForm({
     required this.service,
     this.prefillData,
     this.onPrefillConsumed,
     this.onSubmitted,
+    this.queryService,
+    this.configs,
   });
 
   @override
@@ -204,8 +218,17 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   final _barcodeCtrl = TextEditingController();
   final _qtyCtrl = TextEditingController(text: '1');
   final _descCtrl = TextEditingController();
+  final _qtyFocus = FocusNode();
+  final _descFocus = FocusNode();
   File? _imageFile;
   bool _submitting = false;
+
+  // 条码查询结果
+  double? _buyPrice;
+  double? _sellPrice;
+  String? _productName;
+  bool _lookingUp = false;
+  Timer? _lookupTimer;
 
   @override
   void initState() {
@@ -215,13 +238,73 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     }
   }
 
+  void _applyPrefill(RestockPrefillData data) {
+    setState(() {
+      _selectedShop = data.supplier.isNotEmpty ? data.supplier : null;
+      _buyPrice = data.buyPrice;
+      _sellPrice = data.sellPrice;
+      _productName = data.productName.isNotEmpty ? data.productName : null;
+    });
+    _shopCtrl.text = data.supplier;
+    _barcodeCtrl.text = data.barcode;
+    // 使用预填的商品名称
+    if (data.productName.isNotEmpty && _descCtrl.text.isEmpty) {
+      _descCtrl.text = data.productName;
+    }
+  }
+
   @override
   void dispose() {
+    _lookupTimer?.cancel();
     _shopCtrl.dispose();
     _barcodeCtrl.dispose();
     _qtyCtrl.dispose();
     _descCtrl.dispose();
+    _qtyFocus.dispose();
+    _descFocus.dispose();
     super.dispose();
+  }
+
+  /// 条码输入后延迟查询进价/售价
+  void _onBarcodeChanged(String value) {
+    _lookupTimer?.cancel();
+    if (value.length < 6) {
+      setState(() { _buyPrice = null; _sellPrice = null; _productName = null; });
+      return;
+    }
+    _lookupTimer = Timer(const Duration(milliseconds: 500), () => _lookupBarcode(value));
+  }
+
+  Future<void> _lookupBarcode(String barcode) async {
+    if (widget.queryService == null || widget.configs == null) return;
+    // 用任意有效门店配置查询（供货商名 ≠ 门店名）
+    final storeConfig = widget.configs!.isNotEmpty ? widget.configs!.first : null;
+    if (storeConfig == null) return;
+
+    setState(() => _lookingUp = true);
+    try {
+      final result = await widget.queryService!.queryByBarcode(storeConfig, barcode);
+      if (!mounted) return;
+      if (result.ok && result.data != null) {
+        final data = result.data!;
+        setState(() {
+          _buyPrice = data.buyPrice;
+          _sellPrice = data.sellPrice;
+          _productName = data.name.isNotEmpty ? data.name : null;
+          _lookingUp = false;
+        });
+        // 自动填充备注为商品名称
+        if (_productName != null && _descCtrl.text.isEmpty) {
+          _descCtrl.text = _productName!;
+        }
+      } else {
+        setState(() {
+          _buyPrice = null; _sellPrice = null; _productName = null; _lookingUp = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _lookingUp = false);
+    }
   }
 
   @override
@@ -234,15 +317,8 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     }
   }
 
-  void _applyPrefill(RestockPrefillData data) {
-    setState(() {
-      _selectedShop = data.supplier.isNotEmpty ? data.supplier : null;
-    });
-    _shopCtrl.text = data.supplier;
-    _barcodeCtrl.text = data.barcode;
-  }
-
   Future<void> _pickImage() async {
+    FocusManager.instance.primaryFocus?.unfocus();
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -276,6 +352,10 @@ class _ReplenishFormState extends State<_ReplenishForm> {
       );
       if (!mounted) return;
       if (croppedPath != null) setState(() => _imageFile = File(croppedPath));
+      // 裁剪页面返回后延后收键盘，等路由动画完成
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        FocusManager.instance.primaryFocus?.unfocus();
+      });
     } catch (e) {
       if (mounted) _showMsg('获取图片失败：$e');
     }
@@ -401,6 +481,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                     controller: _barcodeCtrl,
                     decoration: _inputDecoration(hint: '手动输入或扫码'),
                     keyboardType: TextInputType.number,
+                    onChanged: _onBarcodeChanged,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -425,6 +506,35 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                 ),
               ],
             ),
+            // 进价/售价显示
+            if (_lookingUp)
+              const Padding(
+                padding: EdgeInsets.only(top: 6),
+                child: Row(children: [
+                  SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),
+                  SizedBox(width: 8),
+                  Text('查询中…', style: TextStyle(fontSize: 12, color: AppConstants.textSecondary)),
+                ]),
+              )
+            else if (_buyPrice != null || _sellPrice != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(children: [
+                  if (_sellPrice != null) ...[
+                    const Icon(Icons.monetization_on, size: 16, color: Colors.red),
+                    const SizedBox(width: 4),
+                    Text('售价 R${_sellPrice!.toStringAsFixed(2)}',
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.red)),
+                  ],
+                  if (_sellPrice != null && _buyPrice != null) const SizedBox(width: 16),
+                  if (_buyPrice != null) ...[
+                    const Icon(Icons.shopping_cart, size: 14, color: Color(0xFF8B4513)),
+                    const SizedBox(width: 4),
+                    Text('进价 R${_buyPrice!.toStringAsFixed(2)}',
+                        style: const TextStyle(fontSize: 13, color: Color(0xFF8B4513))),
+                  ],
+                ]),
+              ),
             const SizedBox(height: 12),
             // 数量和备注
             Row(
@@ -441,8 +551,19 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _qtyCtrl,
+                        focusNode: _qtyFocus,
                         decoration: _inputDecoration(),
                         keyboardType: TextInputType.number,
+                        onTap: () {
+                          // 先收起当前键盘，再弹出数字键盘
+                          FocusScope.of(context).unfocus();
+                          Future.delayed(const Duration(milliseconds: 50), () {
+                            if (mounted) _qtyFocus.requestFocus();
+                          });
+                          _qtyCtrl.selection = TextSelection(
+                            baseOffset: 0, extentOffset: _qtyCtrl.text.length,
+                          );
+                        },
                         validator: (v) {
                           if (v == null || v.isEmpty) return '必填';
                           if (int.tryParse(v) == null || int.parse(v) <= 0) {
@@ -468,6 +589,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _descCtrl,
+                        focusNode: _descFocus,
                         decoration: _inputDecoration(hint: '颜色、货号等'),
                       ),
                     ],
@@ -484,7 +606,11 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                     color: AppConstants.textSecondary)),
             const SizedBox(height: 6),
             GestureDetector(
-              onTap: _pickImage,
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                FocusManager.instance.primaryFocus?.unfocus();
+                _pickImage();
+              },
               child: Container(
                 height: 180,
                 decoration: BoxDecoration(
@@ -522,7 +648,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                           ],
                         ),
                       ),
-              ),
+            ),
             ),
             const SizedBox(height: 16),
             // 提交按钮
@@ -672,6 +798,7 @@ class _BookingFormState extends State<_BookingForm> {
   }
 
   Future<void> _pickImage() async {
+    FocusManager.instance.primaryFocus?.unfocus();
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -705,6 +832,10 @@ class _BookingFormState extends State<_BookingForm> {
       );
       if (!mounted) return;
       if (croppedPath != null) setState(() => _imageFile = File(croppedPath));
+      // 裁剪页面返回后延后收键盘，等路由动画完成
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        FocusManager.instance.primaryFocus?.unfocus();
+      });
     } catch (e) {
       if (mounted) _showMsg('获取图片失败：$e');
     }
@@ -936,7 +1067,11 @@ class _BookingFormState extends State<_BookingForm> {
                     color: AppConstants.textSecondary)),
             const SizedBox(height: 6),
             GestureDetector(
-              onTap: _pickImage,
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                FocusManager.instance.primaryFocus?.unfocus();
+                _pickImage();
+              },
               child: Container(
                 height: 180,
                 decoration: BoxDecoration(
@@ -973,7 +1108,7 @@ class _BookingFormState extends State<_BookingForm> {
                           ],
                         ),
                       ),
-              ),
+            ),
             ),
             const SizedBox(height: 16),
             // 提交按钮
