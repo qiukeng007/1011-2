@@ -5,24 +5,18 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
       - run: flutter pub get
-      - run: flutter build ipa --release --no-codesign
-      - run: ls -la build/ios/ipa/ || echo "ipa dir not found"
+      - run: flutter build ios --release --no-codesign
+      - run: ls -la build/ios/iphoneos/ || echo "iphoneos dir not found"
       - uses: actions/upload-artifact@v4
         with:
-          name: cash-carry-v1.0.8-ios
-          path: |
-            build/ios/ipa/*.ipa
-            build/ios/ipa/*.xcarchive
-
+          name: cash-carry-v1.0.9-ios-unsigned
+          path: build/ios/iphoneos/Runner.app
