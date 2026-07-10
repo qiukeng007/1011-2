@@ -120,10 +120,10 @@ class RestockService {
         body.addAll(utf8.encode('\r\n'));
       }
 
-      addField('shopname', shopName);
-      addField('barcode', barcode);
+      addField('shopname', shopName.replaceAll('&', ''));
+      addField('barcode', barcode.replaceAll('&', ''));
       addField('quantity', quantity.toString());
-      addField('desc', desc);
+      addField('desc', desc.replaceAll('&', ''));
       final opName = _config.operatorName.isNotEmpty ? _config.operatorName : '未知操作员';
       addField('Operators', opName);
       if (phone != null && phone.isNotEmpty) {

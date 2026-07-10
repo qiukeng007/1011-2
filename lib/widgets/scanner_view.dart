@@ -3,6 +3,15 @@ import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 /// 扫码器 — 实时扫码 + 图片导入识别
+
+/// Strips GS1 symbology identifier prefixes like ]C1, ]e0, etc.
+String _cleanBarcode(String raw_) {
+  if (raw_.startsWith(']C1')) return raw_.substring(3);
+  if (raw_.startsWith(']e0')) return raw_.substring(3);
+  if (raw_.startsWith(']E0')) return raw_.substring(3);
+  return raw_;
+}
+
 class ScannerView extends StatefulWidget {
   final void Function(String barcode) onDetect;
   final VoidCallback onClose;
@@ -58,7 +67,7 @@ class _ScannerViewState extends State<ScannerView>
     final value = barcode.rawValue;
     if (value == null || value.isEmpty || value.length < 6) return;
     _hasDetected = true;
-    widget.onDetect(value);
+    widget.onDetect(_cleanBarcode(value));
   }
 
   Future<void> _pickImage() async {
@@ -82,7 +91,7 @@ class _ScannerViewState extends State<ScannerView>
           final value = barcode.rawValue;
           if (value != null && value.isNotEmpty && value.length >= 6) {
             _hasDetected = true;
-            widget.onDetect(value);
+            widget.onDetect(_cleanBarcode(value));
             return;
           }
         }

@@ -957,7 +957,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       widget.onNavigateToRestock!(RestockPrefillData(
         barcode: barcode,
         supplier: firstData?.supplier ?? '',
-        productName: firstData?.name ?? '',
+        productName: (firstData?.name ?? '').replaceAll('&', ''),
         specification: firstData?.specification ?? '',
         buyPrice: firstData?.buyPrice,
         sellPrice: firstData?.sellPrice,

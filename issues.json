@@ -1,0 +1,10 @@
+[
+  {
+    "line": 127,
+    "text": "final opName = _config.operatorName.isNotEmpty ? _config.operatorName : '鏈煡鎿嶄綔鍛?;"
+  },
+  {
+    "line": 183,
+    "text": "'Id=${Uri.encodeComponent(id)}&operator=${Uri.encodeComponent(_config.operatorName.isNotEmpty ? _config.operatorName : '鏈煡鎿嶄綔鍛?)}',"
+  }
+]
