@@ -896,19 +896,37 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 清除总账号会话（退出登录）
+  /// 清除总账号会话（退出登录）：同时清空门店列表与所有门店会话
   Future<void> _masterLogout() async {
     final baseUrl = _normMasterUrl(_masterBaseUrlCtrl.text);
     final account = _masterAccountCtrl.text.trim();
     final masterKey = '$baseUrl|$account|master';
     await widget.sessionManager.deleteCookie(masterKey);
+    // 清除所有门店会话（Cookie + userId）
+    final savedKeys = await widget.sessionManager.getSavedStoreKeys();
+    for (final key in savedKeys) {
+      await widget.sessionManager.deleteCookie(key);
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('master_login_time');
+    // 清除供货商 uid 缓存
+    final allKeys = prefs.getKeys();
+    for (final k in allKeys) {
+      if (k.startsWith('supplier_uid_map_')) {
+        await prefs.remove(k);
+      }
+    }
+    // 清空门店列表（总账号同步的门店数据）
+    _configs = [];
+    _storeNameCtrls.clear();
+    _loginStatuses.clear();
+    await widget.configService.saveConfigs([]);
     if (mounted) {
       setState(() {
         _masterLoginTime = '';
         _masterLoggedIn = false;
       });
+      widget.onConfigChanged?.call();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('已退出总账号登录'), duration: Duration(seconds: 2)),
       );

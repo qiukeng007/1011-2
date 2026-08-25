@@ -45,9 +45,9 @@ class StoreSyncService {
       final mainId = userIdMatch?.group(1);
 
       // 子门店下拉框：<li ... data-userid="123" ...>名称</li>
-      // 兼容 optionvalue 属性与单/双引号写法
+      // 仅匹配 data-userid（与 smart_eye_stock 一致），避免误抓商品分类下拉框
       final liRegex = RegExp(
-          r"""<li[^>]*(?:data-userid|optionvalue)\s*=\s*["']?(\d+)["']?[^>]*>([^<]+)</li>""",
+          r"""<li[^>]*data-userid\s*=\s*["']?(\d+)["']?[^>]*>([^<]+)</li>""",
           caseSensitive: false);
       final seen = <String>{};
       for (final m in liRegex.allMatches(body)) {
@@ -160,9 +160,8 @@ class StoreSyncService {
 var selectors = [
   'ul[style*="width:284px"] li[optionvalue]',
   'ul[style*="width: 284px"] li[optionvalue]',
-  'li[optionvalue][data-userid]',
-  'li[optionvalue]',
-  'li[data-userid]'
+  'ul[style*="width:284px"] li[data-userid]',
+  'ul[style*="width: 284px"] li[data-userid]'
 ];
 function extract() {
   var seen = {};
