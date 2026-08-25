@@ -63,12 +63,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _authDialogShowing = false;
   String _configJson = '';
   final List<_StoreVerifyStatus> _verifyList = [];
-  String _autoLoginMessage = '';
-  int _sessionRefreshKey = 0;
+  final String _autoLoginMessage = '';
   final Set<String> _verifiedKeys = {};
   bool _serverOnline = false;
   Timer? _serverCheckTimer;
-  Timer? _keepAliveTimer;
+
   RestockPrefillData? _prefillData;
   bool _silentSupplierFetched = false;
   int _settingsRefreshTick = 0;
@@ -76,8 +75,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ValueNotifier(null);
   final ValueNotifier<({String barcode, String supplier})?> _restockSupplierNotifier =
       ValueNotifier(null);
-  DateTime? _lastResumeRefreshTime;
-  static const _resumeRefreshDebounce = Duration(seconds: 60);
+
 
   @override
   void initState() {
@@ -90,7 +88,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _serverCheckTimer?.cancel();
-    _keepAliveTimer?.cancel();
     _restockImageNotifier.dispose();
     _restockSupplierNotifier.dispose();
     _pageController.dispose();
@@ -118,7 +115,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         });
         break;
       case AppLifecycleState.resumed:
-        // App 回到前台 → 停止前台服务 + 刷新会话
+        // App 回到前台 → 停止前台服务（不自动验证登录状态）
         ForegroundService.stop();
         KeepAliveLogger().add(KeepAliveLogEntry(
           timestamp: DateTime.now(),
@@ -126,12 +123,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           detail: 'Foreground service stopped (app resumed)',
           success: true,
         ));
-        final now = DateTime.now();
-        if (_lastResumeRefreshTime == null ||
-            now.difference(_lastResumeRefreshTime!) > _resumeRefreshDebounce) {
-          _lastResumeRefreshTime = now;
-          _refreshSessionsOnResume();
-        }
         break;
       default:
         break;
@@ -204,9 +195,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _verifyAndAutoLogin(configs);
           _checkAppUpdate(svrUrl);
         }
-        // 启动定时检查
+        // 启动定时检查（仅补货服务器在线状态，不做登录状态定时验证）
         _startServerCheck();
-        _startKeepAlive();
       }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
@@ -249,7 +239,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (mounted) {
       setState(() {
         _verifying = false;
-        _sessionRefreshKey++;
       });
     }
   }
@@ -473,65 +462,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       } catch (_) {}
     }
     if (mounted) setState(() => _serverOnline = false);
-  }
-
-  void _startKeepAlive() {
-    _keepAliveTimer?.cancel();
-    // 微信扫码登录可长期在线，无需频繁验证；改为 1 小时检查一次
-    _keepAliveTimer = Timer.periodic(const Duration(minutes: 60), (_) {
-      _refreshSessions();
-    });
-    // 首次也执行一次
-    _refreshSessions();
-  }
-
-  /// 刷新所有门店会话（保活 + 过期自动重登）
-  Future<void> _refreshSessions() async {
-    for (final config in _configs) {
-      if (config.storeId.isEmpty && !config.isValid) continue;
-      await _refreshStoreSession(config);
-    }
-  }
-
-  /// 从后台恢复时刷新会话（带防抖 + 顶部横幅）
-  Future<void> _refreshSessionsOnResume() async {
-    final expired = <String>[];
-    for (final config in _configs) {
-      if (config.storeId.isEmpty && !config.isValid) continue;
-      final ok = await _refreshStoreSession(config);
-      if (!ok) expired.add(config.name);
-    }
-    if (mounted) {
-      setState(() => _sessionRefreshKey++);
-      if (_configs.isNotEmpty) {
-        final total = _configs
-            .where((c) => c.enabled && (c.storeId.isNotEmpty || c.isValid))
-            .length;
-        if (expired.isEmpty && total > 0) {
-          _autoLoginMessage = '会话已刷新 ($total个门店)';
-        } else if (expired.isNotEmpty) {
-          _autoLoginMessage = '${expired.join('、')} 重连失败';
-        }
-        if (_autoLoginMessage.isNotEmpty) {
-          Future.delayed(const Duration(seconds: 2), () {
-            if (mounted) setState(() => _autoLoginMessage = '');
-          });
-        }
-      }
-    }
-  }
-
-  /// 刷新单个门店会话，返回 true=有效, false=过期且重登失败
-  Future<bool> _refreshStoreSession(StoreConfig config) async {
-    final valid = await _queryService.keepAlive(config);
-    if (valid) return true;
-    try {
-      await _loginService.login(config);
-      _verifiedKeys.add(config.storeKey);
-      return true;
-    } catch (_) {
-      return false;
-    }
   }
 
   Future<void> _checkAppUpdate(String serverUrl) async {
