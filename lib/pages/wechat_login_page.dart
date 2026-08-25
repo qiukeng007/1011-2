@@ -50,7 +50,6 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   bool _loading = true;
   bool _loggedIn = false;
   bool _loginAttempting = false;
-  bool _prefillInjected = false;
   bool _storesLoaded = false;
 
   static const _oauthKeywords = [
@@ -126,13 +125,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     if (_loggedIn || url == null) return;
     final u = url.toString();
     if (_isOAuthPage(u)) return;
-    if (!_prefillInjected &&
-        _isAuthPage(u) &&
-        ((widget.employee ?? '').isNotEmpty ||
-            (widget.password ?? '').isNotEmpty)) {
-      _prefillInjected = true;
-      _injectFill();
-    }
+    if (_isAuthPage(u)) _injectFill();
     if (u.contains('/Product/Manage') || u.contains('/product/manage')) {
       _tryLogin(currentUrl: u);
     }
@@ -143,13 +136,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     final u = url.toString();
     setState(() => _loading = false);
     if (_isOAuthPage(u)) return;
-    if (!_prefillInjected &&
-        _isAuthPage(u) &&
-        ((widget.employee ?? '').isNotEmpty ||
-            (widget.password ?? '').isNotEmpty)) {
-      _prefillInjected = true;
-      _injectFill();
-    }
+    if (_isAuthPage(u)) _injectFill();
     if (u.contains('/Product/Manage') || u.contains('/product/manage')) {
       _tryLogin(currentUrl: u);
     }
@@ -181,14 +168,17 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     final passwordJs = jsonEncode(widget.password ?? '');
     await _ctrl!.evaluateJavascript(source: '''
       (function(){
+        if(window.__cashcarry_filled) return;
         var emp=document.querySelector('span[data-type="2"]');if(emp)emp.click();
         setTimeout(function(){
+          var pw=document.querySelectorAll('input[type="password"]');
+          if(pw.length===0) return;
+          window.__cashcarry_filled=true;
           var a=document.getElementById('txt_userName')||document.querySelector('input[placeholder*="账号"]');
           if(a && $accountJs !== ''){a.value=$accountJs;a.dispatchEvent(new Event('input',{bubbles:true}));a.dispatchEvent(new Event('change',{bubbles:true}));}
           var j=document.getElementById('txt_cashierJobName');
           if(j && $employeeJs !== ''){j.value=$employeeJs;j.dispatchEvent(new Event('input',{bubbles:true}));j.dispatchEvent(new Event('change',{bubbles:true}));}
-          var pw=document.querySelectorAll('input[type="password"]');
-          if($passwordJs !== ''){for(var i=0;i<pw.length;i++){pw[i].value=$passwordJs;pw[i].dispatchEvent(new Event('input',{bubbles:true}));pw[i].dispatchEvent(new Event('change',{bubbles:true}));}}
+          for(var i=0;i<pw.length;i++){pw[i].value=$passwordJs;pw[i].dispatchEvent(new Event('input',{bubbles:true}));pw[i].dispatchEvent(new Event('change',{bubbles:true}));}
           setTimeout(function(){
             var btn=document.querySelector('button[type="submit"]')||document.querySelector('input[type="submit"]')||document.querySelector('button.btn-primary')||document.querySelector('a.btn-primary')||document.querySelector('button[class*="login"]')||document.querySelector('button[class*="submit"]')||document.querySelector('a[class*="login"]');
             if(btn)btn.click();else{var fs=document.querySelectorAll('form');for(var f=0;f<fs.length;f++)try{fs[f].submit()}catch(e){}}
@@ -200,15 +190,21 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
 
   /// 从当前页面 DOM 提取门店列表（优先 JS，失败时 HTTP 兜底）
   Future<List<PospalSubStore>> _extractStores(String cookie) async {
-    try {
-      if (_ctrl != null) {
-        final result = await _ctrl!.evaluateJavascript(
-          source: StoreSyncService.jsExtractStores,
-        );
-        final stores = StoreSyncService.parseStoresJson(result?.toString());
-        if (stores.isNotEmpty) return stores;
+    // JS 提取重试 3 次（iOS 上页面下拉框可能渲染较慢），再走 HTTP 兜底
+    for (int attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (_ctrl != null) {
+          final result = await _ctrl!.evaluateJavascript(
+            source: StoreSyncService.jsExtractStores,
+          );
+          final stores = StoreSyncService.parseStoresJson(result?.toString());
+          if (stores.isNotEmpty) return stores;
+        }
+      } catch (_) {}
+      if (attempt < 2) {
+        await Future.delayed(const Duration(milliseconds: 800));
       }
-    } catch (_) {}
+    }
     try {
       final stores = await StoreSyncService.fetchStores(
         baseUrl: _norm(widget.baseUrl),
