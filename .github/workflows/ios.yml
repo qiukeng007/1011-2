@@ -19,8 +19,6 @@ jobs:
           flutter-version: "3.41.2"
           cache: true
       - run: flutter pub get
-      - name: Update CocoaPods repo
-        run: pod repo update
       - name: Build iOS
         run: |
           set -o pipefail

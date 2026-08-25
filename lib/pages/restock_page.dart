@@ -272,10 +272,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
       _buyPrice = data.buyPrice;
       _sellPrice = data.sellPrice;
       _productName = data.productName.isNotEmpty ? data.productName.replaceAll('&', '') : null;
-<<<<<<< HEAD
       _productUid = data.uid;
-=======
->>>>>>> e95634b191357fc4a0543dada75ca167c3685131
     });
     _shopCtrl.text = data.supplier;
     _barcodeCtrl.text = data.barcode;
@@ -342,10 +339,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
           _buyPrice = data.buyPrice;
           _sellPrice = data.sellPrice;
           _productName = data.name.isNotEmpty ? data.name.replaceAll('&', '') : null;
-<<<<<<< HEAD
           _productUid = data.uid?.toString();
-=======
->>>>>>> e95634b191357fc4a0543dada75ca167c3685131
           _lookingUp = false;
         });
         // 自动填充备注为商品名称

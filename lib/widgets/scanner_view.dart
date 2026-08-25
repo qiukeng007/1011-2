@@ -87,25 +87,10 @@ class _ScannerViewState extends State<ScannerView>
     try {
       final value = await _detectFromImage(xfile.path);
       if (!mounted) return;
-<<<<<<< HEAD
       if (value != null) {
         _hasDetected = true;
         widget.onDetect(_cleanBarcode(value));
         return;
-=======
-      if (capture != null) {
-        for (final barcode in capture.barcodes) {
-          if (barcode.format == BarcodeFormat.qrCode ||
-              barcode.format == BarcodeFormat.aztec ||
-              barcode.format == BarcodeFormat.dataMatrix) continue;
-          final value = barcode.rawValue;
-          if (value != null && value.isNotEmpty && value.length >= 6) {
-            _hasDetected = true;
-            widget.onDetect(_cleanBarcode(value));
-            return;
-          }
-        }
->>>>>>> e95634b191357fc4a0543dada75ca167c3685131
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
