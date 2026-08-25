@@ -902,6 +902,8 @@ class _SettingsPageState extends State<SettingsPage> {
     final account = _masterAccountCtrl.text.trim();
     final masterKey = '$baseUrl|$account|master';
     await widget.sessionManager.deleteCookie(masterKey);
+    // 清除 WebView 内保存的 Cookie（防止重新登录仍带旧会话）
+    await widget.sessionManager.clearWebViewCookies(baseUrl);
     // 清除所有门店会话（Cookie + userId）
     final savedKeys = await widget.sessionManager.getSavedStoreKeys();
     for (final key in savedKeys) {

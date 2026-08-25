@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/services.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/login_session.dart';
 
@@ -199,6 +201,19 @@ class SessionManager {
       if (k.startsWith(_cookiePrefix)) {
         await prefs.remove(k);
       }
+    }
+  }
+
+  /// 清除 WebView 内保存的 Cookie（退出登录时调用，防止重新登录仍带旧会话）
+  Future<void> clearWebViewCookies(String baseUrl) async {
+    try {
+      await CookieManager.instance().deleteCookies(url: WebUri(baseUrl));
+    } catch (_) {}
+    if (Platform.isIOS) {
+      try {
+        const ch = MethodChannel('com.cashcarry/cookies');
+        await ch.invokeMethod('clearCookies', {'url': baseUrl});
+      } catch (_) {}
     }
   }
 }

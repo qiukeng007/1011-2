@@ -17,8 +17,7 @@ class CookieChannelPlugin: NSObject, FlutterPlugin {
   }
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard call.method == "getCookies",
-          let args = call.arguments as? [String: Any],
+    guard let args = call.arguments as? [String: Any],
           let urlStr = args["url"] as? String,
           let url = URL(string: urlStr),
           let host = url.host else {
@@ -26,16 +25,33 @@ class CookieChannelPlugin: NSObject, FlutterPlugin {
       return
     }
     let cookieStore = WKWebsiteDataStore.default().httpCookieStore
-    cookieStore.getAllCookies { cookies in
-      let matching = cookies.filter { cookie in
-        let cd = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
-        return host == cd || host.hasSuffix("." + cd) || cd.hasSuffix("." + host)
+    if call.method == "getCookies" {
+      cookieStore.getAllCookies { cookies in
+        let matching = cookies.filter { cookie in
+          let cd = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+          return host == cd || host.hasSuffix("." + cd) || cd.hasSuffix("." + host)
+        }
+        let cookieStr = matching
+          .filter { !$0.value.isEmpty }
+          .map { "\($0.name)=\($0.value)" }
+          .joined(separator: "; ")
+        result(cookieStr)
       }
-      let cookieStr = matching
-        .filter { !$0.value.isEmpty }
-        .map { "\($0.name)=\($0.value)" }
-        .joined(separator: "; ")
-      result(cookieStr)
+    } else if call.method == "clearCookies" {
+      cookieStore.getAllCookies { cookies in
+        let matching = cookies.filter { cookie in
+          let cd = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+          return host == cd || host.hasSuffix("." + cd) || cd.hasSuffix("." + host)
+        }
+        let group = DispatchGroup()
+        for cookie in matching {
+          group.enter()
+          cookieStore.delete(cookie) { group.leave() }
+        }
+        group.notify(queue: .main) { result(true) }
+      }
+    } else {
+      result(FlutterMethodNotImplemented)
     }
   }
 }
@@ -67,8 +83,7 @@ class CookieChannelPlugin: NSObject, FlutterPlugin {
       name: "com.cashcarry/cookies",
       binaryMessenger: controller.binaryMessenger)
     channel.setMethodCallHandler { (call, result) in
-      guard call.method == "getCookies",
-            let args = call.arguments as? [String: Any],
+      guard let args = call.arguments as? [String: Any],
             let urlStr = args["url"] as? String,
             let url = URL(string: urlStr),
             let host = url.host else {
@@ -76,16 +91,33 @@ class CookieChannelPlugin: NSObject, FlutterPlugin {
         return
       }
       let cookieStore = WKWebsiteDataStore.default().httpCookieStore
-      cookieStore.getAllCookies { cookies in
-        let matching = cookies.filter { cookie in
-          let cd = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
-          return host == cd || host.hasSuffix("." + cd) || cd.hasSuffix("." + host)
+      if call.method == "getCookies" {
+        cookieStore.getAllCookies { cookies in
+          let matching = cookies.filter { cookie in
+            let cd = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+            return host == cd || host.hasSuffix("." + cd) || cd.hasSuffix("." + host)
+          }
+          let cookieStr = matching
+            .filter { !$0.value.isEmpty }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: "; ")
+          result(cookieStr)
         }
-        let cookieStr = matching
-          .filter { !$0.value.isEmpty }
-          .map { "\($0.name)=\($0.value)" }
-          .joined(separator: "; ")
-        result(cookieStr)
+      } else if call.method == "clearCookies" {
+        cookieStore.getAllCookies { cookies in
+          let matching = cookies.filter { cookie in
+            let cd = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+            return host == cd || host.hasSuffix("." + cd) || cd.hasSuffix("." + host)
+          }
+          let group = DispatchGroup()
+          for cookie in matching {
+            group.enter()
+            cookieStore.delete(cookie) { group.leave() }
+          }
+          group.notify(queue: .main) { result(true) }
+        }
+      } else {
+        result(FlutterMethodNotImplemented)
       }
     }
   }
