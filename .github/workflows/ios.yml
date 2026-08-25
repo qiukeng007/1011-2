@@ -19,7 +19,20 @@ jobs:
           flutter-version: "3.41.2"
           cache: true
       - run: flutter pub get
-      - run: flutter build ios --release --no-codesign
+      - name: Update CocoaPods repo
+        run: pod repo update
+      - name: Build iOS
+        run: |
+          set -o pipefail
+          flutter build ios --release --no-codesign 2>&1 | tee build_ios.log
+      - name: Upload iOS build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: build_ios.log
+          if-no-files-found: ignore
+          retention-days: 3
       - run: |
           mkdir -p Payload
           cp -r build/ios/iphoneos/Runner.app Payload/
