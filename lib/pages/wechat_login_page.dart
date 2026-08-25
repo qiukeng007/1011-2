@@ -227,8 +227,16 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   /// 从当前页面 DOM 提取门店列表
   /// 1) 精确选择器（与智能眼一致）重试 3 次
   /// 2) 宽泛选择器 + 轮询等待（下拉框延迟渲染兜底）
-  /// 3) HTTP 兜底
+  /// 3) 始终再用 HTTP 抓取一次，与 JS 结果按门店ID合并去重，
+  ///    保证即使页面下拉框只渲染了部分门店，也能补齐全量门店
   Future<List<PospalSubStore>> _extractStores(String cookie) async {
+    final merged = <String, PospalSubStore>{};
+    void merge(List<PospalSubStore> list) {
+      for (final s in list) {
+        merged.putIfAbsent(s.id, () => s);
+      }
+    }
+
     // 1) 精确选择器，重试 3 次
     for (int attempt = 0; attempt < 3; attempt++) {
       try {
@@ -237,9 +245,12 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
             source: StoreSyncService.jsExtractStores,
           );
           final raw = result?.toString() ?? 'null';
-          final stores = StoreSyncService.parseStoresJson(raw);
+          final stores = StoreSyncService.parseStoresValue(result);
           await _diag('JS精确提取(第${attempt + 1}次): $raw → ${stores.length}个');
-          if (stores.isNotEmpty) return stores;
+          if (stores.isNotEmpty) {
+            merge(stores);
+            break;
+          }
         }
       } catch (e) {
         await _diag('JS精确提取异常(第${attempt + 1}次): $e');
@@ -255,25 +266,26 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
           functionBody: StoreSyncService.jsExtractStoresPoll,
         );
         final raw = result?.value?.toString() ?? 'null';
-        final stores = StoreSyncService.parseStoresJson(raw);
+        final stores = StoreSyncService.parseStoresValue(result?.value);
         await _diag('JS宽泛轮询提取: $raw → ${stores.length}个');
-        if (stores.isNotEmpty) return stores;
+        if (stores.isNotEmpty) merge(stores);
       }
     } catch (e) {
       await _diag('JS宽泛轮询提取异常: $e');
     }
-    // 3) HTTP 兜底
+    // 3) HTTP 提取：始终执行，用于补齐 JS 漏掉的门店
     try {
       final stores = await StoreSyncService.fetchStores(
         baseUrl: _norm(widget.baseUrl),
         cookie: cookie,
       );
-      await _diag('HTTP兜底提取: ${stores.length}个');
-      if (stores.isNotEmpty) return stores;
+      await _diag('HTTP提取: ${stores.length}个');
+      merge(stores);
     } catch (e) {
-      await _diag('HTTP兜底提取异常: $e');
+      await _diag('HTTP提取异常: $e');
     }
-    return const [];
+    await _diag('门店提取合并结果: ${merged.length}个');
+    return merged.values.toList();
   }
 
   /// 登录成功后门店为空时，延迟重试提取（等页面下拉框渲染完成）
@@ -319,17 +331,39 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       }
       // 关键：验证会话真实有效，防止二维码登录页的残留 Cookie 被误判为登录成功
       Map<String, dynamic>? report;
-      final valid = await StoreSyncService.validateCookie(
+      var valid = await StoreSyncService.validateCookie(
         baseUrl: _norm(widget.baseUrl),
         cookie: ck,
         onReport: (r) => report = r,
       );
       await _diag('Cookie验证报告: ${jsonEncode(report ?? const {})}');
 
+      // 登录成功后，会话可能尚未完全落定（首次登录时更明显）：
+      // 稍等片刻重新抓取一份更完整的 Cookie，并再次验证，
+      // 避免保存到不完整会话导致只能看到主店、看不到分店
+      var finalCk = ck;
+      if (valid) {
+        for (int i = 0; i < 3; i++) {
+          await Future.delayed(const Duration(milliseconds: 1000));
+          final fresh = await _extractCookies();
+          if (fresh == null || fresh.isEmpty) continue;
+          if (fresh.length <= finalCk.length) continue;
+          final ok2 = await StoreSyncService.validateCookie(
+            baseUrl: _norm(widget.baseUrl),
+            cookie: fresh,
+          );
+          if (ok2) {
+            finalCk = fresh;
+            await _diag('会话落定后重新抓取 Cookie: ${finalCk.length}字符');
+            break;
+          }
+        }
+      }
+
       // 从页面 DOM 提取门店：页面若已进入 /Product/Manage，
       // DOM 里的门店下拉框就是「确实已登录」的最可靠证据（iOS 上
       // HTTP 验证可能因 Cookie 同步延迟而失败，但页面其实已登录）
-      final stores = await _extractStores(ck);
+      var stores = await _extractStores(finalCk);
 
       if (!valid && stores.isEmpty) {
         await _diag('验证未通过且页面无门店数据，等待扫码…');
@@ -337,10 +371,21 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         return;
       }
 
-      await widget.sessionManager.saveCookie(widget.storeKey, ck, via: 'wechat');
-      widget.onLoggedIn(ck);
+      // 门店下拉框是页面加载后异步渲染的：首次登录时可能还没渲染完，
+      // 弹回配置页前多等几次，确保拿到全部门店（避免只显示一个门店）
+      if (stores.isEmpty) {
+        await _diag('门店下拉框可能未渲染完，等待重试…');
+        for (int i = 0; i < 4 && stores.isEmpty; i++) {
+          await Future.delayed(const Duration(seconds: 2));
+          if (!mounted) return;
+          stores = await _extractStores(finalCk);
+        }
+      }
+
+      await widget.sessionManager.saveCookie(widget.storeKey, finalCk, via: 'wechat');
+      widget.onLoggedIn(finalCk);
       _loggedIn = true;
-      await _diag('登录成功，Cookie ${ck.length} 字符，提取门店 ${stores.length}个');
+      await _diag('登录成功，Cookie ${finalCk.length} 字符，提取门店 ${stores.length}个');
 
       if (!_storesLoaded && stores.isNotEmpty) {
         _storesLoaded = true;
@@ -398,15 +443,24 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
           }
         } catch (_) {}
       }
-      // 3) document.cookie（不含 HttpOnly，最后手段）
+      // 3) document.cookie（不含 HttpOnly，最后手段）；
+      //    仅当 WebView 当前页面属于本后台域名时采用，避免把 OAuth 中间页
+      //    （user.pospal.cn）的 Cookie 误当成本后台会话
       if (attempt >= 2 && _ctrl != null) {
         try {
-          final ck = await _ctrl!.evaluateJavascript(
-              source: 'document.cookie') as String?;
-          if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
-            best = ck;
-            bestLen = ck.length;
-            bestSource = 'document.cookie';
+          String curUrl = '';
+          try {
+            curUrl = (await _ctrl!.getUrl())?.toString() ?? '';
+          } catch (_) {}
+          final host = Uri.parse(_norm(widget.baseUrl)).host;
+          if (curUrl.contains(host)) {
+            final ck = await _ctrl!.evaluateJavascript(
+                source: 'document.cookie') as String?;
+            if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
+              best = ck;
+              bestLen = ck.length;
+              bestSource = 'document.cookie';
+            }
           }
         } catch (_) {}
       }

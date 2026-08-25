@@ -126,7 +126,6 @@ class StoreSyncService {
         'submitLoginBtn',
         '__RequestVerificationToken',
         'loginForm',
-        'signin',
       ];
       final isLoginPage = loginMarkers.any(body.contains);
 
@@ -156,7 +155,7 @@ class StoreSyncService {
       "JSON.stringify([...document.querySelectorAll('ul[style*=\"width:284px\"] li[optionvalue]')].map(function(li){return{id:li.getAttribute('optionvalue'),name:li.textContent.replace(/&nbsp;/g,' ').trim()};}))";
 
   /// 宽泛选择器 + 轮询等待的提取脚本（配合 callAsyncJavaScript 使用），
-  /// 兼容下拉框延迟渲染、属性写法差异等情况，最长等待约 6 秒。
+  /// 兼容下拉框延迟渲染、属性写法差异等情况，最长等待约 8 秒，
   static const String jsExtractStoresPoll = '''
 var selectors = [
   'ul[style*="width:284px"] li[optionvalue]',
@@ -183,14 +182,42 @@ function extract() {
   return out;
 }
 var start = Date.now();
+var lastCount = -1;
+var stableCount = 0;
 while (true) {
   var list = extract();
-  if (list.length > 0 || Date.now() - start > 6000) {
+  if (list.length === lastCount) {
+    stableCount++;
+  } else {
+    stableCount = 0;
+    lastCount = list.length;
+  }
+  // 门店数量连续 3 次一致才认为渲染完成（避免只渲染一半就返回）
+  if ((list.length > 0 && stableCount >= 3) || Date.now() - start > 8000) {
     return JSON.stringify(list);
   }
   await new Promise(function (r) { setTimeout(r, 400); });
 }
 ''';
+
+  /// 解析 JS 提取返回值（兼容 String/List 两种格式）
+  static List<PospalSubStore> parseStoresValue(Object? value) {
+    if (value is String) return parseStoresJson(value);
+    if (value is List) {
+      final stores = <PospalSubStore>[];
+      for (final item in value) {
+        if (item is Map) {
+          final id = (item['id'] ?? '').toString();
+          final name = (item['name'] ?? '').toString();
+          if (id.isNotEmpty) {
+            stores.add(PospalSubStore(id: id, name: name));
+          }
+        }
+      }
+      return stores;
+    }
+    return const [];
+  }
 
   /// 解析 JS 提取结果 JSON 为门店列表
   static List<PospalSubStore> parseStoresJson(String? raw) {
