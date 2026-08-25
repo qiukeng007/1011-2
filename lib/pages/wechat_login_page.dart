@@ -5,6 +5,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import '../services/login_diag.dart';
 import '../services/session_manager.dart';
 import '../services/store_sync_service.dart';
 import '../utils/constants.dart';
@@ -19,6 +20,11 @@ import '../utils/constants.dart';
 ///    授权，页面自动跳回 /Product/Manage；
 /// 4. 检测到登录成功后，把 WebView 里的完整 Cookie 抓出来保存到本地，
 ///    之后查询直接带该 Cookie 请求银豹接口，长期有效、无需反复登录。
+///
+/// 门店提取时机（与 smart_eye_stock 一致）：
+/// 只在页面加载完成（onLoadStop）之后才做登录验证与门店提取，
+/// 避免 URL 变化事件在页面还没渲染时就用旧 Cookie 误判登录成功，
+/// 导致提取门店时页面是空的（iOS 上更明显）。
 class WechatLoginPage extends StatefulWidget {
   final String baseUrl;
   final String storeKey;
@@ -51,6 +57,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   bool _loggedIn = false;
   bool _loginAttempting = false;
   bool _storesLoaded = false;
+  bool _pageReady = false;
 
   static const _oauthKeywords = [
     'oauth',
@@ -68,6 +75,10 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
 
   static String _norm(String url) =>
       url.trim().replaceAll(RegExp(r'/+$'), '');
+
+  Future<void> _diag(String msg) async {
+    await LoginDiagLogger().log(msg);
+  }
 
   bool _isOAuthPage(String url) {
     final lower = url.toLowerCase();
@@ -94,6 +105,9 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
             );
           } catch (_) {}
         }
+        await _diag('已注入本地Cookie ${saved.split(';').length} 条');
+      } else {
+        await _diag('本地无保存的Cookie，直接打开登录页');
       }
     } catch (_) {}
     c.loadUrl(
@@ -123,6 +137,9 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     bool? reload,
   ) {
     if (_loggedIn || url == null) return;
+    // 与 smart_eye_stock 一致：页面未加载完成前不做登录检测，
+    // 避免 URL 刚变化（页面还是空的）时就触发提取
+    if (!_pageReady) return;
     final u = url.toString();
     if (_isOAuthPage(u)) return;
     if (_isAuthPage(u)) _injectFill();
@@ -134,16 +151,22 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   void _onLoadStop(InAppWebViewController c, Uri? url) {
     if (url == null) return;
     final u = url.toString();
+    _pageReady = true;
     setState(() => _loading = false);
     if (_isOAuthPage(u)) return;
     if (_isAuthPage(u)) _injectFill();
     if (u.contains('/Product/Manage') || u.contains('/product/manage')) {
+      // 已登录但门店还没提取到：页面这次重新加载完成，正好从新 DOM 提取
+      if (_loggedIn && !_storesLoaded) {
+        _scheduleStoreRetry();
+        return;
+      }
       _tryLogin(currentUrl: u);
     }
   }
 
   void _onJsDetect(List<dynamic> args) {
-    if (_loggedIn) return;
+    if (_loggedIn || !_pageReady) return;
     try {
       final data = args.isNotEmpty ? args[0] as String : '';
       if (_isOAuthPage(data)) return;
@@ -152,6 +175,19 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   }
 
   /// 手动验证（扫码完成后用户点击按钮）
+  Future<void> _manualCheck() async {
+    if (_loggedIn) return;
+    await _diag('用户手动点击验证');
+    String currentUrl = '';
+    if (_ctrl != null) {
+      try {
+        final u = await _ctrl!.getUrl();
+        currentUrl = u?.toString() ?? '';
+      } catch (_) {}
+    }
+    await _tryLogin(currentUrl: currentUrl, manual: true);
+  }
+
   /// 判断是否银豹登录页（用于自动填充工号密码）
   bool _isAuthPage(String url) {
     final lower = url.toLowerCase();
@@ -188,72 +224,131 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     ''');
   }
 
-  /// 从当前页面 DOM 提取门店列表（优先 JS，失败时 HTTP 兜底）
+  /// 从当前页面 DOM 提取门店列表
+  /// 1) 精确选择器（与智能眼一致）重试 3 次
+  /// 2) 宽泛选择器 + 轮询等待（下拉框延迟渲染兜底）
+  /// 3) HTTP 兜底
   Future<List<PospalSubStore>> _extractStores(String cookie) async {
-    // JS 提取重试 3 次（iOS 上页面下拉框可能渲染较慢），再走 HTTP 兜底
+    // 1) 精确选择器，重试 3 次
     for (int attempt = 0; attempt < 3; attempt++) {
       try {
         if (_ctrl != null) {
           final result = await _ctrl!.evaluateJavascript(
             source: StoreSyncService.jsExtractStores,
           );
-          final stores = StoreSyncService.parseStoresJson(result?.toString());
+          final raw = result?.toString() ?? 'null';
+          final stores = StoreSyncService.parseStoresJson(raw);
+          await _diag('JS精确提取(第${attempt + 1}次): $raw → ${stores.length}个');
           if (stores.isNotEmpty) return stores;
         }
-      } catch (_) {}
+      } catch (e) {
+        await _diag('JS精确提取异常(第${attempt + 1}次): $e');
+      }
       if (attempt < 2) {
-        await Future.delayed(const Duration(milliseconds: 800));
+        await Future.delayed(const Duration(milliseconds: 600));
       }
     }
+    // 2) 宽泛选择器 + 轮询等待
+    try {
+      if (_ctrl != null) {
+        final result = await _ctrl!.callAsyncJavaScript(
+          functionBody: StoreSyncService.jsExtractStoresPoll,
+        );
+        final raw = result?.value?.toString() ?? 'null';
+        final stores = StoreSyncService.parseStoresJson(raw);
+        await _diag('JS宽泛轮询提取: $raw → ${stores.length}个');
+        if (stores.isNotEmpty) return stores;
+      }
+    } catch (e) {
+      await _diag('JS宽泛轮询提取异常: $e');
+    }
+    // 3) HTTP 兜底
     try {
       final stores = await StoreSyncService.fetchStores(
         baseUrl: _norm(widget.baseUrl),
         cookie: cookie,
       );
+      await _diag('HTTP兜底提取: ${stores.length}个');
       if (stores.isNotEmpty) return stores;
-    } catch (_) {}
+    } catch (e) {
+      await _diag('HTTP兜底提取异常: $e');
+    }
     return const [];
   }
-  Future<void> _manualCheck() async {
-    if (_loggedIn) return;
-    String currentUrl = '';
-    if (_ctrl != null) {
+
+  /// 登录成功后门店为空时，延迟重试提取（等页面下拉框渲染完成）
+  void _scheduleStoreRetry() {
+    Future.delayed(const Duration(milliseconds: 1500), () async {
+      if (!mounted || !_loggedIn || _storesLoaded || _ctrl == null) return;
+      await _diag('登录成功后延迟重试提取门店');
       try {
-        final u = await _ctrl!.getUrl();
-        currentUrl = u?.toString() ?? '';
+        final ck = await widget.sessionManager.getCookie(widget.storeKey);
+        if (ck == null || ck.isEmpty) return;
+        final stores = await _extractStores(ck);
+        if (!mounted || _storesLoaded) return;
+        if (stores.isNotEmpty) {
+          _storesLoaded = true;
+          widget.onStoresLoaded?.call(stores);
+        } else {
+          // 再补一次
+          await Future.delayed(const Duration(milliseconds: 2000));
+          if (!mounted || !_loggedIn || _storesLoaded || _ctrl == null) return;
+          final ck2 = await widget.sessionManager.getCookie(widget.storeKey);
+          if (ck2 == null || ck2.isEmpty) return;
+          final s2 = await _extractStores(ck2);
+          if (!mounted || _storesLoaded) return;
+          if (s2.isNotEmpty) {
+            _storesLoaded = true;
+            widget.onStoresLoaded?.call(s2);
+          }
+        }
       } catch (_) {}
-    }
-    await _tryLogin(currentUrl: currentUrl, manual: true);
+    });
   }
 
   Future<void> _tryLogin({String currentUrl = '', bool manual = false}) async {
     if (_loggedIn || _loginAttempting) return;
     _loginAttempting = true;
     try {
+      await _diag('开始登录验证 currentUrl=$currentUrl manual=$manual');
       final ck = await _extractCookies();
       if (ck == null || ck.isEmpty) {
+        await _diag('未提取到 Cookie，等待扫码…');
         if (manual) _showError('未检测到登录信息，请确认已在微信中完成扫码验证');
         return;
       }
       // 关键：验证会话真实有效，防止二维码登录页的残留 Cookie 被误判为登录成功
+      Map<String, dynamic>? report;
       final valid = await StoreSyncService.validateCookie(
         baseUrl: _norm(widget.baseUrl),
         cookie: ck,
+        onReport: (r) => report = r,
       );
-      if (!valid) {
-        debugPrint('[WechatLogin] 会话验证未通过，等待扫码…');
+      await _diag('Cookie验证报告: ${jsonEncode(report ?? const {})}');
+
+      // 从页面 DOM 提取门店：页面若已进入 /Product/Manage，
+      // DOM 里的门店下拉框就是「确实已登录」的最可靠证据（iOS 上
+      // HTTP 验证可能因 Cookie 同步延迟而失败，但页面其实已登录）
+      final stores = await _extractStores(ck);
+
+      if (!valid && stores.isEmpty) {
+        await _diag('验证未通过且页面无门店数据，等待扫码…');
         if (manual) _showError('未检测到有效登录，请用微信完成扫码后重试');
         return;
       }
+
       await widget.sessionManager.saveCookie(widget.storeKey, ck, via: 'wechat');
       widget.onLoggedIn(ck);
       _loggedIn = true;
-      // 登录后立即从页面 DOM 提取门店列表（比 HTTP 正则更可靠）
-      if (!_storesLoaded) {
+      await _diag('登录成功，Cookie ${ck.length} 字符，提取门店 ${stores.length}个');
+
+      if (!_storesLoaded && stores.isNotEmpty) {
         _storesLoaded = true;
-        final stores = await _extractStores(ck);
         widget.onStoresLoaded?.call(stores);
+      } else if (!_storesLoaded) {
+        _scheduleStoreRetry();
       }
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -269,36 +364,58 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     }
   }
 
-  /// 从 WebView 抓取该域名下的完整 Cookie（重试 6 次）
+  /// 从 WebView 抓取该域名下的完整 Cookie（多来源取最长，重试 6 次）
   Future<String?> _extractCookies() async {
     for (int attempt = 0; attempt < 6; attempt++) {
       if (attempt > 0) await Future.delayed(const Duration(milliseconds: 500));
+      String? best;
+      int bestLen = 0;
+      String bestSource = '';
+      // 1) CookieManager（插件，iOS 读 WKWebsiteDataStore）
       try {
         final cs = await CookieManager.instance()
             .getCookies(url: WebUri(_norm(widget.baseUrl)));
         if (cs.isNotEmpty) {
-          return cs.map((c) => '${c.name}=${c.value}').join('; ');
+          final ck = cs.map((c) => '${c.name}=${c.value}').join('; ');
+          if (ck.length > bestLen) {
+            best = ck;
+            bestLen = ck.length;
+            bestSource = 'CookieManager(${cs.length}个)';
+          }
         }
       } catch (_) {}
+      // 2) iOS 原生通道（直接读 WKWebsiteDataStore）
       if (Platform.isIOS) {
         try {
-          // iOS 原生通道：直接从 WKWebsiteDataStore 读 Cookie，
-          // 解决 CookieManager/document.cookie 抓不到会话 Cookie 的问题
           const ch = MethodChannel('com.cashcarry/cookies');
           final ck = await ch.invokeMethod('getCookies', {
             'url': _norm(widget.baseUrl),
           }) as String?;
-          if (ck != null && ck.isNotEmpty) return ck;
+          if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
+            best = ck;
+            bestLen = ck.length;
+            bestSource = 'iOS原生通道';
+          }
         } catch (_) {}
       }
-      if (_ctrl != null && attempt >= 4) {
+      // 3) document.cookie（不含 HttpOnly，最后手段）
+      if (attempt >= 2 && _ctrl != null) {
         try {
-          final ck =
-              await _ctrl!.evaluateJavascript(source: 'document.cookie') as String?;
-          if (ck != null && ck.isNotEmpty) return ck;
+          final ck = await _ctrl!.evaluateJavascript(
+              source: 'document.cookie') as String?;
+          if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
+            best = ck;
+            bestLen = ck.length;
+            bestSource = 'document.cookie';
+          }
         } catch (_) {}
+      }
+      if (best != null && best.isNotEmpty) {
+        await _diag('Cookie来源(第${attempt + 1}次): $bestSource，${best.length}字符');
+        return best;
       }
     }
+    await _diag('Cookie 提取失败（6次均无结果）');
     return null;
   }
 
@@ -311,6 +428,21 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         duration: const Duration(seconds: 4),
       ),
     );
+  }
+
+  /// 复制诊断日志到剪贴板（供发回排查）
+  Future<void> _copyDiagLogs() async {
+    try {
+      final text = await LoginDiagLogger().exportText();
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('诊断日志已复制到剪贴板，请粘贴发回'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    } catch (_) {}
   }
 
   /// window.open 拦截：银豹某些弹窗用 window.open，直接跳当前页
@@ -396,6 +528,19 @@ window.open=function(u,t,f){if(u&&typeof u==="string"&&u!==""&&u!=="about:blank"
                 foregroundColor: AppConstants.primaryColor,
                 side: const BorderSide(color: AppConstants.primaryColor),
                 padding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: _copyDiagLogs,
+              icon: const Icon(Icons.bug_report_outlined, size: 14),
+              label: const Text('诊断日志', style: TextStyle(fontSize: 12)),
+              style: TextButton.styleFrom(
+                foregroundColor: AppConstants.textSecondary,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
               ),
             ),
           ),
