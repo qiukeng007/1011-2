@@ -13,8 +13,10 @@ class LoginSession {
   bool get isValid => cookie.isNotEmpty;
 
   bool get isExpired {
-    // Cookie 有效期约 7 天
-    return DateTime.now().difference(createdAt).inDays > 7;
+    // 与 smart_eye_stock 一致：本地不按时间强制过期。
+    // 银豹 OAuth（微信扫码）会话长期有效，是否过期由服务器端判断：
+    // 请求被重定向到登录页时才提示重新登录。
+    return DateTime.now().difference(createdAt).inDays > 365;
   }
 }
 

@@ -1,7 +1,7 @@
 name: pospal_stock_app
 description: 银豹多店库存查询 - Android App
 publish_to: 'none'
-version: 1.0.9+9
+version: 1.0.11+11
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -25,6 +25,8 @@ dependencies:
   image: ^3.3.0
   # 条码生成（规范编码）
   barcode: ^2.2.0
+  # WebView 微信扫码登录（移植自 smart_eye_stock，长期在线）
+  flutter_inappwebview: ^6.1.0
   # 打开 URL（浏览器下载）
   url_launcher: ^6.2.0
   # 获取 APP 版本号
@@ -32,7 +34,7 @@ dependencies:
   # 文件路径
   path_provider: ^2.1.0
   # 文件分享
-  share_plus: ^9.0.0
+  share_plus: ^7.2.2  # 降级以兼容 flutter_inappwebview 的 web 1.x（与 smart_eye_stock 一致）
 
 dev_dependencies:
   flutter_test:

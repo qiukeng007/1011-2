@@ -12,6 +12,12 @@ class RestockService {
   RestockService(this._config);
 
   /// 获取供货商列表
+  /// 供货商列表是否来自银豹自动获取（只读，不可手动修改）
+  bool get suppliersReadonly => _config.suppliersReadonly;
+
+  /// 供货商列表是否为手动模式（手动写入且未排序，需要静默获取 UID）
+  bool get suppliersManualMode => _config.suppliersManualMode;
+
   List<String> get suppliers => _config.supplierList;
 
   /// 获取操作员姓名
@@ -120,10 +126,10 @@ class RestockService {
         body.addAll(utf8.encode('\r\n'));
       }
 
-      addField('shopname', shopName);
-      addField('barcode', barcode);
+      addField('shopname', shopName.replaceAll('&', ''));
+      addField('barcode', barcode.replaceAll('&', ''));
       addField('quantity', quantity.toString());
-      addField('desc', desc);
+      addField('desc', desc.replaceAll('&', ''));
       final opName = _config.operatorName.isNotEmpty ? _config.operatorName : '未知操作员';
       addField('Operators', opName);
       if (phone != null && phone.isNotEmpty) {

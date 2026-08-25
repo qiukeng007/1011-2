@@ -68,6 +68,19 @@ class _ConfigFormState extends State<ConfigForm> {
           _f('员工工号', _jobCtrl, '例如：1001', (v) => widget.onChanged(widget.config.copyWith(cashierJobNumber: v)), keyboardType: TextInputType.number),
           const SizedBox(height: 8),
           _f('工号密码', _pwdCtrl, '工号登录密码', (v) => widget.onChanged(widget.config.copyWith(password: v)), obscureText: true),
+          const SizedBox(height: 6),
+          Row(children: [
+            Checkbox(
+              value: widget.config.enabled,
+              onChanged: (v) => widget.onChanged(widget.config.copyWith(enabled: v ?? true)),
+              visualDensity: VisualDensity.compact,
+            ),
+            const Text('参与首页搜索', style: TextStyle(fontSize: 13)),
+            const Spacer(),
+            if (widget.config.storeId.isNotEmpty)
+              Text('门店ID: ' + widget.config.storeId,
+                  style: const TextStyle(fontSize: 11, color: AppConstants.textSecondary)),
+          ]),
         ]),
       ),
     );

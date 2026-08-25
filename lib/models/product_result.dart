@@ -22,8 +22,14 @@ class ProductData {
   final double? buyPrice;
   final dynamic uid;
 
+  /// 商品图片URL
+  final String? imageUrl;
+
   /// 多条结果标记
   final int? multipleMatches;
+
+  /// 多条匹配时的候选商品列表（供用户弹窗选择）
+  final List<ProductData>? candidates;
 
   /// 调试字段
   final String? rawKeys;
@@ -45,7 +51,9 @@ class ProductData {
     this.sellPrice,
     this.buyPrice,
     this.uid,
+    this.imageUrl,
     this.multipleMatches,
+    this.candidates,
     this.rawKeys,
     this.numericFields,
     this.parseFailed = false,
@@ -53,8 +61,46 @@ class ProductData {
     this.allColumns,
   });
 
-  factory ProductData.fromRaw(Map<String, dynamic> raw, String barcode) {
+  /// 复制一份并修改部分字段（用于附加多条匹配的候选列表）
+  ProductData copyWith({
+    String? barcode,
+    String? name,
+    String? specification,
+    String? category,
+    double? stock,
+    String? unit,
+    String? supplier,
+    double? sellPrice,
+    double? buyPrice,
+    dynamic uid,
+    String? imageUrl,
+    int? multipleMatches,
+    List<ProductData>? candidates,
+    String? allColumns,
+  }) {
     return ProductData(
+      barcode: barcode ?? this.barcode,
+      name: name ?? this.name,
+      specification: specification ?? this.specification,
+      category: category ?? this.category,
+      stock: stock ?? this.stock,
+      unit: unit ?? this.unit,
+      supplier: supplier ?? this.supplier,
+      sellPrice: sellPrice ?? this.sellPrice,
+      buyPrice: buyPrice ?? this.buyPrice,
+      uid: uid ?? this.uid,
+      imageUrl: imageUrl ?? this.imageUrl,
+      multipleMatches: multipleMatches ?? this.multipleMatches,
+      candidates: candidates ?? this.candidates,
+      rawKeys: rawKeys,
+      numericFields: numericFields,
+      parseFailed: parseFailed,
+      fromBrowser: fromBrowser,
+      allColumns: allColumns ?? this.allColumns,
+    );
+  }
+
+  factory ProductData.fromRaw(Map<String, dynamic> raw, String barcode) {    return ProductData(
       barcode: _strVal(raw, ['barcode', 'Barcode', 'productBarcode', 'ProductBarcode']) ?? barcode,
       name: _strVal(raw, ['name', 'Name', 'productName', 'ProductName']) ?? '',
       specification: _strVal(raw, [

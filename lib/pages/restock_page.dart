@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -9,6 +10,7 @@ import 'package:image/image.dart' as img;
 import '../widgets/crop_page.dart';
 import '../models/restock_prefill_data.dart';
 import '../models/store_config.dart';
+import '../services/product_image_cache.dart';
 import '../services/restock_service.dart';
 import '../services/query_service.dart';
 import '../services/session_manager.dart';
@@ -27,6 +29,8 @@ class RestockPage extends StatefulWidget {
   final PageController? pageController;
   final QueryService? queryService;
   final List<StoreConfig>? configs;
+  final void Function(String barcode, String imageUrl)? onImageUploaded;
+  final void Function(String barcode, String supplier)? onSupplierSynced;
 
   const RestockPage({
     super.key,
@@ -37,6 +41,8 @@ class RestockPage extends StatefulWidget {
     this.pageController,
     this.queryService,
     this.configs,
+    this.onImageUploaded,
+    this.onSupplierSynced,
   });
 
   @override
@@ -46,6 +52,9 @@ class RestockPage extends StatefulWidget {
 class _RestockPageState extends State<RestockPage>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+
+  // 顾客预定提交成功后递增，强制重建表单实现彻底清空
+  int _bookingResetTick = 0;
 
   static const _tabColors = [
     Color(0xFF007bff), // 日常补货 蓝
@@ -173,12 +182,18 @@ class _RestockPageState extends State<RestockPage>
                 onSubmitted: widget.onSubmitted,
                 queryService: widget.queryService,
                 configs: widget.configs,
+                onImageUploaded: widget.onImageUploaded,
+                onSupplierSynced: widget.onSupplierSynced,
               ),
               _BookingForm(
+                key: ValueKey(_bookingResetTick),
                 service: widget.restockService,
                 prefillData: widget.prefillData,
                 onPrefillConsumed: widget.onPrefillConsumed,
-                onSubmitted: widget.onSubmitted,
+                onSubmitted: () {
+                  setState(() => _bookingResetTick++);
+                  widget.onSubmitted?.call();
+                },
               ),
               _OrderList(service: widget.restockService),
             ],
@@ -198,6 +213,8 @@ class _ReplenishForm extends StatefulWidget {
   final VoidCallback? onSubmitted;
   final QueryService? queryService;
   final List<StoreConfig>? configs;
+  final void Function(String barcode, String imageUrl)? onImageUploaded;
+  final void Function(String barcode, String supplier)? onSupplierSynced;
   const _ReplenishForm({
     required this.service,
     this.prefillData,
@@ -205,6 +222,8 @@ class _ReplenishForm extends StatefulWidget {
     this.onSubmitted,
     this.queryService,
     this.configs,
+    this.onImageUploaded,
+    this.onSupplierSynced,
   });
 
   @override
@@ -214,6 +233,8 @@ class _ReplenishForm extends StatefulWidget {
 class _ReplenishFormState extends State<_ReplenishForm> {
   final _formKey = GlobalKey<FormState>();
   String? _selectedShop;
+  /// 预填时的原始供货商（用于检测补货时是否被修改）
+  String? _originalSupplier;
   final _shopCtrl = TextEditingController();
   final _barcodeCtrl = TextEditingController();
   final _qtyCtrl = TextEditingController(text: '1');
@@ -222,6 +243,12 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   final _descFocus = FocusNode();
   File? _imageFile;
   bool _submitting = false;
+  /// 本次提交上传到银豹成功后的新图片地址（用于回传查询页刷新显示）
+  String? _syncedImageUrl;
+  /// 用户是否在补货界面手动上传/拍照了新图片（需要同步到银豹，覆盖旧图）
+  bool _imageFromUser = false;
+  /// 当前表单条码对应的商品唯一ID（多条匹配时按ID精准同步，避免改错商品）
+  String? _productUid;
 
   // 条码查询结果
   double? _buyPrice;
@@ -241,9 +268,11 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   void _applyPrefill(RestockPrefillData data) {
     setState(() {
       _selectedShop = data.supplier.isNotEmpty ? data.supplier : null;
+      _originalSupplier = data.supplier.isNotEmpty ? data.supplier : null;
       _buyPrice = data.buyPrice;
       _sellPrice = data.sellPrice;
-      _productName = data.productName.isNotEmpty ? data.productName : null;
+      _productName = data.productName.isNotEmpty ? data.productName.replaceAll('&', '') : null;
+      _productUid = data.uid;
     });
     _shopCtrl.text = data.supplier;
     _barcodeCtrl.text = data.barcode;
@@ -251,6 +280,19 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     if (data.productName.isNotEmpty && _descCtrl.text.isEmpty) {
       _descCtrl.text = data.productName;
     }
+    // 查询结果有图片时自动下载填入图片框（保留重新上传）
+    if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
+      // 预填图片来自银豹，标记为非手动上传（除非用户之后重新上传）
+      _imageFromUser = false;
+      _downloadPrefillImage(data.imageUrl!);
+    }
+  }
+
+  /// 优先使用查询时预下载的缓存图片，未命中再现场下载
+  Future<void> _downloadPrefillImage(String url) async {
+    final path = await ProductImageCache.ensureDownloaded(url);
+    if (!mounted || path == null) return;
+    setState(() => _imageFile = File(path));
   }
 
   @override
@@ -277,8 +319,14 @@ class _ReplenishFormState extends State<_ReplenishForm> {
 
   Future<void> _lookupBarcode(String barcode) async {
     if (widget.queryService == null || widget.configs == null) return;
-    // 用任意有效门店配置查询（供货商名 ≠ 门店名）
-    final storeConfig = widget.configs!.isNotEmpty ? widget.configs!.first : null;
+    // 用任意勾选的有效门店配置查询（总账号模式优先使用带门店ID的门店）
+    StoreConfig? storeConfig;
+    for (final c in widget.configs!) {
+      if (c.enabled && (c.storeId.isNotEmpty || c.isValid)) {
+        storeConfig = c;
+        break;
+      }
+    }
     if (storeConfig == null) return;
 
     setState(() => _lookingUp = true);
@@ -290,7 +338,8 @@ class _ReplenishFormState extends State<_ReplenishForm> {
         setState(() {
           _buyPrice = data.buyPrice;
           _sellPrice = data.sellPrice;
-          _productName = data.name.isNotEmpty ? data.name : null;
+          _productName = data.name.isNotEmpty ? data.name.replaceAll('&', '') : null;
+          _productUid = data.uid?.toString();
           _lookingUp = false;
         });
         // 自动填充备注为商品名称
@@ -351,7 +400,11 @@ class _ReplenishFormState extends State<_ReplenishForm> {
         MaterialPageRoute(builder: (_) => CropPage(imagePath: picked.path)),
       );
       if (!mounted) return;
-      if (croppedPath != null) setState(() => _imageFile = File(croppedPath));
+      if (croppedPath != null) {
+        setState(() => _imageFile = File(croppedPath));
+        // 用户手动上传的新图片 → 提交补货后同步到银豹（覆盖旧图）
+        _imageFromUser = true;
+      }
       // 裁剪页面返回后延后收键盘，等路由动画完成
       WidgetsBinding.instance.addPostFrameCallback((_) {
         FocusManager.instance.primaryFocus?.unfocus();
@@ -390,15 +443,92 @@ class _ReplenishFormState extends State<_ReplenishForm> {
 
       if (mounted) {
         if (ok) {
-          _showMsg('提交成功！');
+          // 提交后的银豹同步（不阻断补货）：
+          // 1. 若补货界面修改了供货商，同步变更到银豹（所有已登录门店）
+          // 2. 若用户在补货界面手动上传了新图片，同步图片到银豹（所有已登录门店，覆盖旧图）
+          final syncMsgs = <String>[];
+          final originalSupplier = _originalSupplier?.trim() ?? '';
+          final currentSupplier = _selectedShop?.trim() ?? '';
+          final supplierChanged = originalSupplier.isNotEmpty &&
+              currentSupplier.isNotEmpty &&
+              currentSupplier != originalSupplier;
+          final imageChanged = _imageFromUser && _imageFile != null;
+          // 供货商同步与图片同步并行执行，缩短提交等待时间
+          var supplierSync = Future<String?>.value(null);
+          var imageSync = Future<String?>.value(null);
+          if (supplierChanged) {
+            supplierSync = _syncSupplierToPospal(currentSupplier);
+          }
+          if (imageChanged) {
+            imageSync = _syncImageToPospal();
+          }
+          final syncResults = await Future.wait([supplierSync, imageSync]);
+          if (supplierChanged) {
+            final syncErr = syncResults[0];
+            syncMsgs.add((syncErr == null || syncErr.isEmpty)
+                ? '供货商已同步到银豹'
+                : '供货商同步失败：$syncErr');
+          }
+          if (imageChanged) {
+            final imgSyncErr = syncResults[1];
+            syncMsgs.add((imgSyncErr == null || imgSyncErr.isEmpty)
+                ? '图片已同步到银豹'
+                : '图片同步失败：$imgSyncErr');
+          }
+          final resultMsg = syncMsgs.isEmpty
+              ? '提交成功！'
+              : '提交成功，${syncMsgs.join('，')}';
+          _showMsg(resultMsg);
           OperationLogService.add(
             store: _selectedShop!,
             action: '补货',
             barcode: _barcodeCtrl.text,
             detail: '数量: ${int.tryParse(_qtyCtrl.text) ?? 1}',
           );
+          final submittedBarcode = _barcodeCtrl.text;
+          final uploadedImageUrl = _syncedImageUrl;
           _resetForm();
           widget.onSubmitted?.call();
+          if (imageChanged &&
+              uploadedImageUrl != null &&
+              uploadedImageUrl.isNotEmpty &&
+              submittedBarcode.isNotEmpty) {
+            widget.onImageUploaded?.call(submittedBarcode, uploadedImageUrl);
+          }
+          if (supplierChanged &&
+              (syncResults[0] == null || syncResults[0]!.isEmpty)) {
+            widget.onSupplierSynced?.call(submittedBarcode, currentSupplier);
+          }
+          // 操作记录描述（失败不阻断，静默忽略）：供货商变更 / 图片更新
+          final opName = widget.service.operatorName.trim();
+          if (opName.isNotEmpty) {
+            if (supplierChanged &&
+                (syncResults[0] == null || syncResults[0]!.isEmpty)) {
+              for (final store in (widget.configs ?? [])
+                  .where((c) => c.enabled && (c.storeId.isNotEmpty || c.isValid))) {
+                await widget.queryService?.updateProductOperationNote(
+                  store,
+                  submittedBarcode,
+                  opName,
+                  '更新供货商',
+                  productUid: _productUid,
+                );
+              }
+            }
+            if (imageChanged &&
+                (syncResults[1] == null || syncResults[1]!.isEmpty)) {
+              for (final store in (widget.configs ?? [])
+                  .where((c) => c.enabled && (c.storeId.isNotEmpty || c.isValid))) {
+                await widget.queryService?.updateProductOperationNote(
+                  store,
+                  submittedBarcode,
+                  opName,
+                  '更新照片',
+                  productUid: _productUid,
+                );
+              }
+            }
+          }
         } else {
           _showMsg('提交失败，请检查网络和服务器地址');
         }
@@ -407,6 +537,138 @@ class _ReplenishFormState extends State<_ReplenishForm> {
       if (mounted) _showMsg('提交出错：$e');
     } finally {
       if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  /// 把补货界面修改后的供货商同步到银豹（所有已登录门店）
+  /// 返回 null 表示全部同步成功，否则返回错误信息（补货不受影响）
+  Future<String?> _syncSupplierToPospal(String newSupplierName) async {
+    final queryService = widget.queryService;
+    if (queryService == null || widget.configs == null) {
+      return '未配置门店，无法同步';
+    }
+    final configs = widget.configs!
+        .where((c) => c.enabled && (c.storeId.isNotEmpty || c.isValid))
+        .toList();
+    if (configs.isEmpty) return '未勾选要同步的门店（请到设置页勾选）';
+    final errors = <String>[];
+    var syncedCount = 0;
+    for (final store in configs) {
+      try {
+        final err = await queryService.updateProductSupplier(
+          store,
+          _barcodeCtrl.text,
+          newSupplierName,
+          productUid: _productUid,
+        );
+        if (err == null) {
+          syncedCount++;
+        } else if (err != '未登录') {
+          errors.add('${store.name}：$err');
+        }
+      } catch (e) {
+        errors.add('${store.name}：$e');
+      }
+    }
+    if (errors.isEmpty) {
+      if (syncedCount == 0) return '没有已登录的门店，无法同步';
+      return null;
+    }
+    return errors.join('；');
+  }
+
+  /// 把补货界面手动上传的新图片同步到银豹（覆盖旧图）
+  /// 遍历所有已登录门店上传，返回 null 表示全部成功，否则返回错误信息（补货不受影响）
+  Future<String?> _syncImageToPospal() async {
+    final queryService = widget.queryService;
+    if (queryService == null || widget.configs == null) {
+      return '未配置门店，无法同步';
+    }
+    final configs = widget.configs!
+        .where((c) => c.enabled && (c.storeId.isNotEmpty || c.isValid))
+        .toList();
+    if (configs.isEmpty) return '未勾选要同步的门店（请到设置页勾选）';
+    final file = _imageFile;
+    if (file == null) return '缺少图片，无法同步';
+    try {
+      // 银豹限制单图不超过 3MB，上传前统一压缩到 500KB 以内，体积小更稳定
+      final bytes = _compressImageForUpload(await file.readAsBytes());
+      // 所有门店并行上传，失败自动重试 1 次，显著缩短总耗时并提高成功率
+      final futures = configs
+          .map((store) => _uploadImageWithRetry(queryService, store, bytes))
+          .toList();
+      final results = await Future.wait(futures);
+      final errors = <String>[];
+      String? newImageUrl;
+      var syncedCount = 0;
+      for (var i = 0; i < results.length; i++) {
+        final r = results[i];
+        if (r.error == null) {
+          syncedCount++;
+          if (r.imageUrl != null && r.imageUrl!.isNotEmpty) {
+            newImageUrl = r.imageUrl;
+          }
+        } else {
+          errors.add('${configs[i].name}：${r.error}');
+        }
+      }
+      _syncedImageUrl = newImageUrl;
+      if (errors.isEmpty) {
+        if (syncedCount == 0) return '没有已登录的门店，无法同步';
+        return null;
+      }
+      return errors.join('；');
+    } catch (e) {
+      return '图片读取或压缩失败：$e';
+    }
+  }
+
+  /// 单门店图片上传，失败自动重试 1 次；返回 (error, url)：error 为 null 表示成功（未登录视为跳过）
+  Future<({String? error, String? imageUrl})> _uploadImageWithRetry(
+      QueryService queryService, StoreConfig store, List<int> bytes) async {
+    String? lastErr;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final (err, url) = await queryService.replaceProductImage(
+          store,
+          _barcodeCtrl.text,
+          bytes,
+          'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg',
+          productUid: _productUid,
+        );
+        if (err == null && url != null) {
+          return (error: null, imageUrl: url);
+        }
+        if (err == '未登录') return (error: null, imageUrl: null); // 未登录跳过，不视为失败
+        lastErr = err;
+      } catch (e) {
+        lastErr = e.toString();
+      }
+    }
+    return (error: lastErr, imageUrl: null);
+  }
+
+  /// 上传图片统一压缩到 500KB 以内（与查询页无图上传同逻辑）
+  List<int> _compressImageForUpload(Uint8List bytes) {
+    if (bytes.length < 512 * 1024) return bytes; // 已 ≤500KB
+    try {
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return bytes;
+      final img2 = decoded.width >= decoded.height
+          ? img.copyResize(decoded, width: 1200)
+          : img.copyResize(decoded, height: 1200);
+      // 逐级降质量直到 ≤500KB
+      for (final q in [85, 70, 50, 35]) {
+        final encoded = img.encodeJpg(img2, quality: q);
+        if (encoded.length < 512 * 1024) return encoded;
+      }
+      // 仍超限：缩小到 800 再压
+      final img3 = img2.width >= img2.height
+          ? img.copyResize(img2, width: 800)
+          : img.copyResize(img2, height: 800);
+      return img.encodeJpg(img3, quality: 60);
+    } catch (_) {
+      return bytes;
     }
   }
 
@@ -437,6 +699,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     setState(() {
       _imageFile = null;
       _selectedShop = null;
+      _imageFromUser = false;
     });
   }
 
@@ -748,6 +1011,7 @@ class _BookingForm extends StatefulWidget {
   final VoidCallback? onPrefillConsumed;
   final VoidCallback? onSubmitted;
   const _BookingForm({
+    super.key,
     required this.service,
     this.prefillData,
     this.onPrefillConsumed,
@@ -875,12 +1139,16 @@ class _BookingFormState extends State<_BookingForm> {
       if (mounted) {
         if (ok) {
           _showMsg('预定提交成功！');
-          OperationLogService.add(
-            store: _selectedShop!,
-            action: '预定',
-            barcode: _barcodeCtrl.text,
-            detail: '数量: ${int.tryParse(_qtyCtrl.text) ?? 1}',
-          );
+          try {
+            OperationLogService.add(
+              store: _selectedShop ?? '',
+              action: '预定',
+              barcode: _barcodeCtrl.text,
+              detail: '数量: ${int.tryParse(_qtyCtrl.text) ?? 1}',
+            );
+          } catch (_) {
+            // 日志失败不影响提交结果
+          }
           _resetForm();
           widget.onSubmitted?.call();
         } else {

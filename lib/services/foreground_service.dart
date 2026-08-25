@@ -35,4 +35,11 @@ class ForegroundService {
       return false;
     }
   }
+
+  static Future<bool> isNotificationEnabled() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>('isNotificationEnabled') ?? false;
+    } catch (_) { return false; }
+  }
 }

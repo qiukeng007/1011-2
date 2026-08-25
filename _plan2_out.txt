@@ -1,0 +1,77 @@
+=== MAIN product map FULL ===
+final product = <String, dynamic>{
+        'uid': uid,
+        'name': colVal(tds, 'name') ?? '',
+        'barcode': colVal(tds, 'barcode') ?? '',
+        'attribute4': colVal(tds, 'attribute4') ?? '', // 货号
+        'extBarcode': colVal(tds, 'extBarcode') ?? '',
+        'brandName': colVal(tds, 'brandName') ?? '',
+        'specification': colVal(tds, 'attribute6') ?? '', // 规格
+        'pinyin': colVal(tds, 'pinyin') ?? '',
+        'category': colVal(tds, 'categoryName') ?? '',
+        'stock': _parseNum(colVal(tds, 'stock') ?? ''),
+        'unit': colVal(tds, 'baseUnitName') ?? '—',
+        'sellPrice': _parseNum(colVal(tds, 'sellPrice') ?? ''),
+        'buyPrice': _parseNum(colVal(tds, 'buyPrice') ?? ''),
+        'wholeSalePrice': _parseNum(colVal(tds, 'wholeSalePrice') ?? ''),
+        'memberPrice': _parseNum(colVal(tds, 'memberPrice') ?? ''),
+        'supplier': colVal(tds, 'supplierName') ?? '',
+        'createdDatetime': colVal(tds, 'createDate') ?? '',
+        '_allColumns': allColsBuf.toString(),
+      };
+
+      
+
+=== LEGACY parser FULL ===
+List<Map<String, dynamic>> _parseProductTableLegacy(String html) {
+    final products = <Map<String, dynamic>>[];
+
+    final rowRegex = RegExp(
+      r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>([\s\S]*?)</tr>',
+      caseSensitive: false,
+    );
+
+    for (final rowMatch in rowRegex.allMatches(html)) {
+      final uid = rowMatch.group(2);
+      final rowHtml = rowMatch.group(3) ?? '';
+
+      final tdRegex = RegExp(
+        r'<td[^>]*>([\s\S]*?)</td>',
+        caseSensitive: false,
+      );
+      final tds = tdRegex.allMatches(rowHtml).map((m) =>
+          _stripHtml(m.group(1)?.trim() ?? '')).toList();
+
+      if (tds.length < 15) continue;
+
+      final allColsBuf = StringBuffer();
+      for (var i = 0; i < tds.length; i++) {
+        if (i > 0) allColsBuf.write(' | ');
+        allColsBuf.write('[$i]${tds[i]}');
+      }
+
+      final product = <String, dynamic>{
+        'uid': uid,
+        'name': _getTd(tds, 3),
+        'barcode': _getTd(tds, 4),
+        'attribute4': _getTd(tds, 5),
+        'extBarcode': _getTd(tds, 6),
+        'brandName': _getTd(tds, 7),
+        'specification': _getTd(tds, 8),
+        'pinyin': _getTd(tds, 9),
+        'category': _getTd(tds, 10),
+        'stock': _parseNum(_getTd(tds, 11)),
+        'unit': _getTd(tds, 12),
+        'sellPrice': _parseNum(_getTd(tds, 13)),
+        'sellPrice2': _parseNum(_getTd(tds, 14)),
+        'customerPrice': _parseNum(_getTd(tds, 15)),
+        'isCustomerDiscount': _getTd(tds, 16),
+        'supplier': _getTd(tds, 17),
+        'createdDatetime': _getTd(tds, 20),
+        '_allColumns': allColsBuf.toString(),
+      };
+
+      products.add(product);
+    }
+
+    

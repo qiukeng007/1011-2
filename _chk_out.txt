@@ -1,0 +1,5 @@
+D:\APP_DEMO\pospal_stock_app\lib\models\product_result.dart: fromRaw x1
+D:\APP_DEMO\pospal_stock_app\lib\utils\product_parser.dart: fromRaw x2
+product_result.dart: CRLF=198 LF=198
+query_service.dart: CRLF=824 LF=824
+query_page.dart: CRLF=1847 LF=1847

@@ -10,12 +10,11 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import com.example.pospal_stock_app.R
 
 class KeepAliveService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "keep_alive_v3"
+        const val CHANNEL_ID = "keep_alive_channel"
         const val NOTIFICATION_ID = 520
         private var running = false
 
@@ -66,7 +65,7 @@ class KeepAliveService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "保持在线",
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "银豹查询后台保活服务"
                 setShowBadge(false)
@@ -87,7 +86,7 @@ class KeepAliveService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("银豹查询")
             .setContentText("保持在线 · 门店会话保活中")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(pendingIntent)

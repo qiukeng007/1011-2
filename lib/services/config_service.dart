@@ -42,8 +42,8 @@ class ConfigService {
     final prefs = await SharedPreferences.getInstance();
     final jsonStr = prefs.getString(_configKey);
     if (jsonStr == null || jsonStr.isEmpty) {
-      // 默认返回 1 个空门店配置
-      return [const StoreConfig(name: '门店1')];
+      // 总账号模式下没有旧门店配置：门店由微信扫码登录后同步生成
+      return [];
     }
 
     try {
@@ -51,18 +51,26 @@ class ConfigService {
       final configs = <StoreConfig>[];
       for (final json in jsonList) {
         final config = StoreConfig.fromJson(json as Map<String, dynamic>);
+        // 清理旧的手动门店（没有门店ID，在总账号模式下无法查询）
+        if (config.storeId.isEmpty) continue;
         // 从加密存储读取密码
         final password = await _secureStorage.read(
           key: '$_passwordPrefix${config.storeKey}',
         );
         configs.add(config.copyWith(password: password ?? ''));
       }
+      // 有清理动作时写回，避免下次再加载旧数据
+      if (configs.length != jsonList.length) {
+        await prefs.setString(
+          _configKey,
+          jsonEncode(configs.map((c) => c.toJson()).toList()),
+        );
+      }
       return configs;
     } catch (_) {
-      return [const StoreConfig(name: '门店1')];
+      return [];
     }
   }
-
   /// 保存单个门店密码
   Future<void> savePassword(String storeKey, String password) async {
     if (password.isNotEmpty) {

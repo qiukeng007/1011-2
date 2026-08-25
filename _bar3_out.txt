@@ -1,0 +1,14 @@
+=== print_service ean13 ===
+Offset, dpi);
+      final y = mmToDot(e.y, dpi);
+      switch (e.type) {
+        case 'barcode':
+          final bh = mmToDot(e.height ?? 8, dpi);
+          final bx = mmToDot(1, dpi) + ox; // X=1mm 极限左移
+          if (c.barcodeType == 'ean13' && p.barcode.length >= 11 && p.barcode.length <= 13) {
+            final raw = p.barcode.replaceAll(RegExp(r'[^0-9]'), '');
+            final ean = raw.length >= 13 ? raw.substring(0, 12) : raw.padLeft(12, '0');
+            b.writeln('BARCODE $bx,$y,"EAN13",$bh,0,0,2,2,"$ean"');
+          } else {
+            // 自动计算窄线: 条码估算宽 > 可用宽90% → 用narrow=1
+      

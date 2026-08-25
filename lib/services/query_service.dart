@@ -3,6 +3,7 @@ import 'dart:io';
 import '../models/store_config.dart';
 import '../models/product_result.dart';
 import '../models/query_log.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'session_manager.dart';
 import 'query_logger.dart';
 
@@ -26,12 +27,52 @@ class QueryService {
 
   static const String _ua =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  /// 已预热（切换到目标门店会话）的门店ID集合，避免每次查询重复切店
+  final Set<String> _warmedStores = {};
+
+  /// 供货商名称→uid 缓存（storeKey → map），内存 + SharedPreferences 持久化
+  final Map<String, Map<String, String>> _supplierUidCache = {};
+
+  static const String _supplierUidCachePrefix = 'supplier_uid_map_';
+
 
   QueryService(this._sessionManager) {
     _httpClient = HttpClient();
     _httpClient.autoUncompress = true;
     _httpClient.connectionTimeout = const Duration(seconds: 15);
   }
+
+  /// 通过 GET Product/Manage?userId= 把账号会话切换到目标门店（网页端切店方式）
+  Future<void> _warmStoreSession(
+    String baseUrl,
+    String storeId,
+    String cookie,
+  ) async {
+    try {
+      final uri = Uri.parse('$baseUrl/Product/Manage?userId=$storeId');
+      final request = await _httpClient.getUrl(uri);
+      request.headers.set('User-Agent', _ua);
+      request.headers.set('Accept', 'text/html,application/xhtml+xml');
+      request.headers.set('Cookie', cookie);
+      request.followRedirects = false;
+      final response = await request.close().timeout(const Duration(seconds: 8));
+      await _readBody(response);
+    } catch (_) {}
+  }
+
+  /// 总账号模式直接使用门店ID（并切店预热），旧工号模式回退 _getUserId
+  Future<String?> _resolveStoreUserId(StoreConfig store, String cookie) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final userId = store.storeId.isNotEmpty
+        ? store.storeId
+        : await _getUserId(baseUrl, store.storeKey, cookie);
+    if (store.storeId.isNotEmpty && !_warmedStores.contains(store.storeId)) {
+      _warmedStores.add(store.storeId);
+      await _warmStoreSession(baseUrl, store.storeId, cookie);
+    }
+    return userId;
+  }
+
 
   /// 释放 HttpClient 资源
   void dispose() {
@@ -56,12 +97,14 @@ class QueryService {
     final cookie = await _sessionManager.getCookie(store.storeKey);
     if (cookie == null || cookie.isEmpty) {
       timer?.record('加载Cookie', detail: '未找到cookie');
-      return const ProductResult(ok: false, error: '未登录，请先工号登录');
+      return const ProductResult(ok: false, error: '未登录，请先在设置里登录（工号或微信扫码）');
     }
 
     try {
-      // Step 1: 获取 userId（优先从缓存读取，避免每次查询都 GET /Product/Manage）
-      final userId = await _getUserId(baseUrl, store.storeKey, cookie, timer: timer);
+      // Step 1: 获取 userId——总账号同步模式直接使用门店ID，缓存仅在缺失时兜底
+      final userId = store.storeId.isNotEmpty
+          ? store.storeId
+          : await _getUserId(baseUrl, store.storeKey, cookie, timer: timer);
       if (userId == null) {
         timer?.record('获取userId', detail: '失败');
         return ProductResult(
@@ -70,7 +113,13 @@ class QueryService {
         );
       }
 
-      // Step 2: 调用 LoadProductsByPage 搜索条码
+      // Step 2: 先切到目标门店会话（微信扫码后会话默认停在总店，需切店后查询才返回该店库存）
+      if (store.storeId.isNotEmpty && !_warmedStores.contains(store.storeId)) {
+        _warmedStores.add(store.storeId);
+        await _warmStoreSession(baseUrl, store.storeId, cookie);
+      }
+
+      // Step 3: 调用 LoadProductsByPage 搜索条码
       final referer = '$baseUrl/Product/Manage';
       final pageData = _encodeForm({
         'userId': userId,
@@ -115,7 +164,7 @@ class QueryService {
           await _sessionManager.deleteCookie(store.storeKey);
           return ProductResult(
             ok: false,
-            error: '${store.name} 登录已失效，请重新工号登录',
+            error: '${store.name} 登录已失效，请重新登录',
           );
         }
       }
@@ -168,38 +217,44 @@ class QueryService {
         );
       }
 
-      // 查找匹配条码的商品
+      // 查找匹配条码的商品（精确匹配优先；无精确匹配时用整页结果兜底）
       final matched = products.where((p) =>
           p['barcode'] == code || p['barcode']?.trim() == code).toList();
 
-      Map<String, dynamic>? hit;
-
-      if (matched.isNotEmpty) {
-        hit = matched.first;
-      } else if (products.length == 1) {
-        // 无精确匹配但仅一个商品 → 扩展码对应不同主条码
-        hit = products.first;
-      } else if (products.isEmpty) {
+      final pool = matched.isNotEmpty ? matched : products;
+      if (pool.isEmpty) {
         return ProductResult(ok: false, error: '未找到该条码商品');
-      } else {
-        return ProductResult(ok: false, error: '条码不精确，匹配到${products.length}个商品');
       }
 
-      final allCols = hit['_allColumns'] as String?;
+      // 构建候选商品列表（多条匹配时供用户弹窗选择）
+      final candidateProducts = pool.map((raw) {
+        return ProductData(
+          barcode: raw['barcode'] ?? code,
+          name: raw['name'] ?? '',
+          specification: raw['specification'] ?? '',
+          category: raw['category'] ?? '',
+          stock: raw['stock'],
+          unit: raw['unit'] ?? '—',
+          supplier: raw['supplier'] ?? '',
+          sellPrice: raw['sellPrice'],
+          buyPrice: raw['buyPrice'],
+          uid: raw['uid'],
+          imageUrl: raw['imageUrl'] ?? '',
+          allColumns: raw['_allColumns'] as String?,
+        );
+      }).toList();
 
-      final product = ProductData(
-        barcode: hit['barcode'] ?? code,
-        name: hit['name'] ?? '',
-        specification: hit['specification'] ?? '',
-        category: hit['category'] ?? '',
-        stock: hit['stock'],
-        unit: hit['unit'] ?? '—',
-        supplier: hit['supplier'] ?? '',
-        sellPrice: hit['sellPrice'],
-        buyPrice: hit['buyPrice'],
-        uid: hit['uid'],
-        multipleMatches: matched.length > 1 ? matched.length : null,
-        allColumns: allCols,
+      // 诊断：库存为 0/缺失时记录原始列数据，便于确认是否查错门店或列错位
+      final primaryCols = candidateProducts.first.allColumns;
+      if ((candidateProducts.first.stock == null || candidateProducts.first.stock == 0) &&
+          primaryCols != null &&
+          primaryCols.isNotEmpty) {
+        timer?.record('库存明细', detail: primaryCols);
+      }
+
+      final product = candidateProducts.first.copyWith(
+        multipleMatches: candidateProducts.length > 1 ? candidateProducts.length : null,
+        candidates: candidateProducts.length > 1 ? candidateProducts : null,
       );
 
       return ProductResult(ok: true, data: product);
@@ -234,38 +289,43 @@ class QueryService {
   /// 保活：静默 GET /Product/Manage，刷新 session 并更新 userId 缓存
   /// 返回 true = Cookie 有效，false = 已过期需重登
   Future<bool> keepAlive(StoreConfig store) async {
-    try {
-      final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
-      final cookie = await _sessionManager.getCookie(store.storeKey);
-      if (cookie == null || cookie.isEmpty) return false;
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+        final cookie = await _sessionManager.getCookie(store.storeKey);
+        if (cookie == null || cookie.isEmpty) return false;
 
-      final uri = Uri.parse('$baseUrl/Product/Manage');
-      final request = await _httpClient.getUrl(uri);
-      request.headers.set('User-Agent', _ua);
-      request.headers.set('Accept', 'text/html,application/xhtml+xml');
-      request.headers.set('Cookie', cookie);
-      request.followRedirects = false;
+        final uri = Uri.parse('$baseUrl/Product/Manage');
+        final request = await _httpClient.getUrl(uri);
+        request.headers.set('User-Agent', _ua);
+        request.headers.set('Accept', 'text/html,application/xhtml+xml');
+        request.headers.set('Cookie', cookie);
+        request.followRedirects = false;
 
-      final response = await request.close().timeout(const Duration(seconds: 10));
-      final body = await _readBody(response);
+        final response = await request.close().timeout(const Duration(seconds: 10));
+        final body = await _readBody(response);
 
-      if (response.statusCode != 200) return false;
+        if (response.statusCode != 200) return false;
 
-      // 检查是否跳转到登录页
-      if (response.headers.value('location') != null &&
-          RegExp(r'signin|login', caseSensitive: false).hasMatch(response.headers.value('location')!)) {
-        return false; // Cookie 已过期
+        // ??????????
+        if (response.headers.value('location') != null &&
+            RegExp(r'signin|login', caseSensitive: false).hasMatch(response.headers.value('location')!)) {
+          return false; // Cookie ???
+        }
+
+        // ?? userId ??
+        final userId = _extractUserIdFromBody(body);
+        if (userId != null) {
+          await _sessionManager.saveUserId(store.storeKey, userId);
+        }
+        return true;
+      } catch (_) {
+        if (attempt == 0) {
+          await Future.delayed(const Duration(seconds: 2));
+        }
       }
-
-      // 刷新 userId 缓存
-      final userId = _extractUserIdFromBody(body);
-      if (userId != null) {
-        await _sessionManager.saveUserId(store.storeKey, userId);
-      }
-      return true;
-    } catch (_) {
-      return true; // 网络异常不判定过期，保留现有 Cookie
     }
+    return false; // ??????????
   }
 
   /// 从 Product/Manage 页面 HTML 提取 currentUserId
@@ -382,6 +442,13 @@ class QueryService {
       return tds[idx];
     }
 
+    // 按列名取原始（未去标签）HTML，名称列需要读取属性
+    String? colValRaw(List<String> rawTds, String name) {
+      final idx = colMap[name];
+      if (idx == null || idx >= rawTds.length) return null;
+      return rawTds[idx];
+    }
+
     // Step 2: 匹配每个商品行 <tr data="..." data-uid="...">
     final rowRegex = RegExp(
       r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>([\s\S]*?)</tr>',
@@ -392,13 +459,14 @@ class QueryService {
       final uid = rowMatch.group(2);
       final rowHtml = rowMatch.group(3) ?? '';
 
-      // 提取所有 <td> 内容
+      // 提取所有 <td> 内容（保留原始HTML，名称列需读取 title/data-name 完整名称）
       final tdRegex = RegExp(
         r'<td[^>]*>([\s\S]*?)</td>',
         caseSensitive: false,
       );
-      final tds = tdRegex.allMatches(rowHtml).map((m) =>
-          _stripHtml(m.group(1)?.trim() ?? '')).toList();
+      final rawTds = tdRegex.allMatches(rowHtml).map((m) =>
+          m.group(1)?.trim() ?? '').toList();
+      final tds = rawTds.map(_stripHtml).toList();
 
       if (tds.length < 10) continue;
 
@@ -423,7 +491,7 @@ class QueryService {
 
       final product = <String, dynamic>{
         'uid': uid,
-        'name': colVal(tds, 'name') ?? '',
+        'name': _extractFullName(colValRaw(rawTds, 'name') ?? ''),
         'barcode': colVal(tds, 'barcode') ?? '',
         'attribute4': colVal(tds, 'attribute4') ?? '', // 货号
         'extBarcode': colVal(tds, 'extBarcode') ?? '',
@@ -439,6 +507,7 @@ class QueryService {
         'memberPrice': _parseNum(colVal(tds, 'memberPrice') ?? ''),
         'supplier': colVal(tds, 'supplierName') ?? '',
         'createdDatetime': colVal(tds, 'createDate') ?? '',
+        'imageUrl': _extractImageUrl(rowHtml),
         '_allColumns': allColsBuf.toString(),
       };
 
@@ -524,8 +593,9 @@ class QueryService {
         r'<td[^>]*>([\s\S]*?)</td>',
         caseSensitive: false,
       );
-      final tds = tdRegex.allMatches(rowHtml).map((m) =>
-          _stripHtml(m.group(1)?.trim() ?? '')).toList();
+      final rawTds = tdRegex.allMatches(rowHtml).map((m) =>
+          m.group(1)?.trim() ?? '').toList();
+      final tds = rawTds.map(_stripHtml).toList();
 
       if (tds.length < 15) continue;
 
@@ -537,7 +607,7 @@ class QueryService {
 
       final product = <String, dynamic>{
         'uid': uid,
-        'name': _getTd(tds, 3),
+        'name': _extractFullName(_getTd(rawTds, 3)),
         'barcode': _getTd(tds, 4),
         'attribute4': _getTd(tds, 5),
         'extBarcode': _getTd(tds, 6),
@@ -553,6 +623,7 @@ class QueryService {
         'isCustomerDiscount': _getTd(tds, 16),
         'supplier': _getTd(tds, 17),
         'createdDatetime': _getTd(tds, 20),
+        'imageUrl': _extractImageUrl(rowHtml),
         '_allColumns': allColsBuf.toString(),
       };
 
@@ -568,12 +639,60 @@ class QueryService {
     return tds[index];
   }
 
-  /// 去除 HTML 标签，保留文本内容
+  /// 去除 HTML 标签并反转义 HTML 实体，保留文本内容
+  /// 名称单元格可能只显示截断文本，完整名称通常在 title / data-name 属性中。
+  /// 收集所有候选（title / data-original-title / data-name / 单元格文本），取最长者。
+  String _extractFullName(String rawHtml) {
+    if (rawHtml.isEmpty) return '';
+    // 收集所有可能的完整名称候选，最后取最长的一个：
+    // 银豹名称列通常用 title / data-name 属性保存完整名称，单元格文本可能被截断。
+    final candidates = <String>[];
+    void addCandidate(String? s) {
+      if (s == null) return;
+      final t = _htmlUnescape(s.trim());
+      if (t.isNotEmpty) candidates.add(t);
+    }
+
+    // 1) <a> 超链接上的 title（支持单引号/双引号）
+    final aTitleM = RegExp(
+      '<a[^>]*title\\s*=\\s*["\\\']([^"\\\']*)["\\\']',
+      caseSensitive: false,
+    ).firstMatch(rawHtml);
+    addCandidate(aTitleM?.group(1));
+
+    // 2) 任意标签上的 title / data-original-title / data-name
+    for (final attr in ['title', 'data-original-title', 'data-name']) {
+      final m = RegExp(
+        '$attr\\s*=\\s*["\\\']([^"\\\']*)["\\\']',
+        caseSensitive: false,
+      ).firstMatch(rawHtml);
+      addCandidate(m?.group(1));
+    }
+
+    // 3) 单元格文本
+    addCandidate(_stripHtml(rawHtml));
+
+    if (candidates.isEmpty) return '';
+    candidates.sort((a, b) => b.length.compareTo(a.length));
+    return candidates.first;
+  }
+
   String _stripHtml(String html) {
-    return html
+    return _htmlUnescape(html)
         .replaceAll(RegExp(r'<[^>]*>'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
+  }
+
+  /// 从商品行HTML提取商品图片URL
+  String? _extractImageUrl(String rowHtml) {
+    final imgMatch = RegExp(r'<img[^>]+src="([^"]+)"', caseSensitive: false).firstMatch(rowHtml);
+    if (imgMatch != null) {
+      final src = imgMatch.group(1)!;
+      if (src.startsWith('http')) return src;
+      if (src.startsWith('/')) return src;
+    }
+    return null;
   }
 
   /// 解析数字（处理 "-" 和空值）
@@ -676,8 +795,9 @@ class QueryService {
   Future<String?> updateProductStock(
     StoreConfig store,
     String barcode,
-    double newStock,
-  ) async {
+    double newStock, {
+    String? productUid,
+  }) async {
     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
     final code = barcode.trim();
     if (code.isEmpty) return '条码为空';
@@ -687,7 +807,7 @@ class QueryService {
 
     try {
       // 1. 获取 userId
-      final userId = await _getUserId(baseUrl, store.storeKey, cookie);
+      final userId = await _resolveStoreUserId(store, cookie);
       if (userId == null) return '无法获取门店信息';
 
       // 2. 搜索条码获取 productId
@@ -733,10 +853,21 @@ class QueryService {
       }
 
       final contentView = searchData['contentView'] as String? ?? '';
-      final productIdMatch = RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView);
-      if (productIdMatch == null) return '未找到该商品';
-
-      final productId = productIdMatch.group(1)!;
+      // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+      String? productId;
+      if (productUid != null && productUid.isNotEmpty) {
+        final uidRowRegex = RegExp(
+            r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+        for (final m in uidRowRegex.allMatches(contentView)) {
+          if (m.group(2) == productUid) {
+            productId = m.group(1);
+            break;
+          }
+        }
+      }
+      productId ??=
+          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+      if (productId == null) return '未找到该商品';
 
       // 3. FindProduct 获取完整数据
       final findUri = Uri.parse('$baseUrl/Product/FindProduct');
@@ -809,7 +940,1091 @@ class QueryService {
     }
   }
 
-  /// URL 编码表单数据
+  /// 修改商品供货商（与修改库存同一流程：搜索→FindProduct→改字段→SaveProduct）
+  /// 新供货商设为商品默认供货商（替换原绑定列表）
+  ///
+  /// 返回 null 表示成功，否则返回错误信息。
+  Future<String?> updateProductSupplier(
+    StoreConfig store,
+    String barcode,
+    String newSupplierName, {
+    String? productUid,
+  }) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return '条码为空';
+
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) return '未登录';
+
+    try {
+      // 1. 获取 userId
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return '无法获取门店信息';
+
+      // 2. 获取供货商 uid 映射（缓存优先 → 未命中实时拉取并自动重试 1 次）
+      final cachedUidMap = _supplierUidCache[store.storeKey] ??
+          await _loadSupplierUidCache(store.storeKey);
+      if (cachedUidMap.isNotEmpty) {
+        _supplierUidCache[store.storeKey] = cachedUidMap;
+      }
+      String? newSupplierUid;
+      if (cachedUidMap.isNotEmpty) {
+        newSupplierUid = _matchSupplierUid(newSupplierName, cachedUidMap);
+      }
+      if (newSupplierUid == null) {
+        // 缓存未命中：实时拉取，失败自动重试 1 次
+        Map<String, String> uidMap = const {};
+        String errorDiag = '无法获取银豹供货商列表';
+        for (var attempt = 0; attempt < 2; attempt++) {
+          final fetched = await _fetchSupplierUidMap(baseUrl, cookie, userId);
+          if (fetched.uidMap.isNotEmpty) {
+            uidMap = fetched.uidMap;
+            _supplierUidCache[store.storeKey] = uidMap;
+            await _saveSupplierUidCache(store.storeKey, uidMap);
+            break;
+          }
+          errorDiag = '无法获取银豹供货商列表（${fetched.error}）';
+        }
+        if (uidMap.isEmpty) {
+          return errorDiag;
+        }
+        newSupplierUid = _matchSupplierUid(newSupplierName, uidMap);
+        if (newSupplierUid == null) {
+          final sample = uidMap.keys.take(8).join('、');
+          return '银豹供货商列表中未找到「$newSupplierName」（当前共 ${uidMap.length} 个：$sample…）';
+        }
+      }
+
+      // 3. 搜索条码获取 productId
+      final pageData = _encodeForm({
+        'userId': userId,
+        'enable': '1',
+        'productTagUidsJson': '[]',
+        'keyword': code,
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        'pageIndex': '1',
+        'pageSize': '20',
+        'orderColumn': '',
+        'asc': 'true',
+      });
+
+      final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+      final searchReq = await _httpClient.postUrl(searchUri);
+      searchReq.headers.set('User-Agent', _ua);
+      searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      searchReq.headers.set('Origin', baseUrl);
+      searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      searchReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      searchReq.headers.set('Cookie', cookie);
+      searchReq.followRedirects = false;
+      searchReq.write(pageData);
+      final searchResp = await searchReq.close().timeout(const Duration(seconds: 15));
+      final searchBody = await _readBody(searchResp);
+
+      if (searchResp.statusCode != 200) {
+        return '搜索失败 (HTTP ${searchResp.statusCode})';
+      }
+
+      Map<String, dynamic> searchData;
+      try {
+        searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '搜索返回格式异常';
+      }
+
+      final contentView = searchData['contentView'] as String? ?? '';
+      // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+      String? productId;
+      if (productUid != null && productUid.isNotEmpty) {
+        final uidRowRegex = RegExp(
+            r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+        for (final m in uidRowRegex.allMatches(contentView)) {
+          if (m.group(2) == productUid) {
+            productId = m.group(1);
+            break;
+          }
+        }
+      }
+      productId ??=
+          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+      if (productId == null) return '未找到该商品';
+
+
+      // 4. FindProduct 获取完整数据
+      final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+      final findReq = await _httpClient.postUrl(findUri);
+      findReq.headers.set('User-Agent', _ua);
+      findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      findReq.headers.set('Origin', baseUrl);
+      findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      findReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      findReq.headers.set('Cookie', cookie);
+      findReq.followRedirects = false;
+      findReq.write('productId=$productId');
+      final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+      final findBody = await _readBody(findResp);
+
+      if (findResp.statusCode != 200) {
+        return '获取商品数据失败 (HTTP ${findResp.statusCode})';
+      }
+
+      Map<String, dynamic> findData;
+      try {
+        findData = jsonDecode(findBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '商品数据解析失败';
+      }
+
+      final product = findData['product'] as Map<String, dynamic>?;
+      if (product == null) return '商品数据为空';
+
+      // 5. 修改供货商字段（新供货商设为默认，替换原绑定列表）
+      product['supplierUid'] = newSupplierUid;
+      product['supplierName'] = newSupplierName;
+      product['supplierRangeList'] = [
+        {
+          'supplierUid': newSupplierUid,
+          'supplierName': newSupplierName,
+          'isDefault': '1',
+        },
+      ];
+
+      // 6. SaveProduct 保存
+      final productJson = jsonEncode(product);
+      final saveData = 'userId=$userId&productJson=${Uri.encodeComponent(productJson)}';
+
+      final saveUri = Uri.parse('$baseUrl/Product/SaveProduct');
+      final saveReq = await _httpClient.postUrl(saveUri);
+      saveReq.headers.set('User-Agent', _ua);
+      saveReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      saveReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      saveReq.headers.set('Origin', baseUrl);
+      saveReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      saveReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      saveReq.headers.set('Cookie', cookie);
+      saveReq.followRedirects = false;
+      saveReq.write(saveData);
+      final saveResp = await saveReq.close().timeout(const Duration(seconds: 15));
+      final saveBody = await _readBody(saveResp);
+
+      if (saveResp.statusCode != 200) {
+        return '保存失败 (HTTP ${saveResp.statusCode})';
+      }
+
+      try {
+        final saveResult = jsonDecode(saveBody) as Map<String, dynamic>;
+        if (saveResult['successed'] == true) {
+          return null; // 成功
+        }
+        return saveResult['msg'] as String? ?? '保存失败';
+      } catch (_) {
+        return '保存响应异常';
+      }
+    } catch (e) {
+      return '${store.name} 修改供货商异常：${e.toString()}';
+    }
+  }
+
+  /// 修改商品名称（与修改库存同一流程：搜索→FindProduct→改字段→SaveProduct）
+  ///
+  /// 返回 null 表示成功，否则返回错误信息。
+  Future<String?> updateProductName(
+    StoreConfig store,
+    String barcode,
+    String newName, {
+    String? productUid,
+  }) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return '条码为空';
+    final newNameTrim = newName.trim();
+    if (newNameTrim.isEmpty) return '商品名称不能为空';
+
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) return '未登录';
+
+    try {
+      // 1. 获取 userId
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return '无法获取门店信息';
+
+      // 2. 搜索条码获取 productId
+      final pageData = _encodeForm({
+        'userId': userId,
+        'enable': '1',
+        'productTagUidsJson': '[]',
+        'keyword': code,
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        'pageIndex': '1',
+        'pageSize': '20',
+        'orderColumn': '',
+        'asc': 'true',
+      });
+
+      final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+      final searchReq = await _httpClient.postUrl(searchUri);
+      searchReq.headers.set('User-Agent', _ua);
+      searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      searchReq.headers.set('Origin', baseUrl);
+      searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      searchReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      searchReq.headers.set('Cookie', cookie);
+      searchReq.followRedirects = false;
+      searchReq.write(pageData);
+      final searchResp = await searchReq.close().timeout(const Duration(seconds: 15));
+      final searchBody = await _readBody(searchResp);
+
+      if (searchResp.statusCode != 200) {
+        return '搜索失败 (HTTP ${searchResp.statusCode})';
+      }
+
+      Map<String, dynamic> searchData;
+      try {
+        searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '搜索返回格式异常';
+      }
+
+      final contentView = searchData['contentView'] as String? ?? '';
+      // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+      String? productId;
+      if (productUid != null && productUid.isNotEmpty) {
+        final uidRowRegex = RegExp(
+            r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+        for (final m in uidRowRegex.allMatches(contentView)) {
+          if (m.group(2) == productUid) {
+            productId = m.group(1);
+            break;
+          }
+        }
+      }
+      productId ??=
+          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+      if (productId == null) return '未找到该商品';
+
+      // 3. FindProduct 获取完整数据
+      final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+      final findReq = await _httpClient.postUrl(findUri);
+      findReq.headers.set('User-Agent', _ua);
+      findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      findReq.headers.set('Origin', baseUrl);
+      findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      findReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      findReq.headers.set('Cookie', cookie);
+      findReq.followRedirects = false;
+      findReq.write('productId=$productId');
+      final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+      final findBody = await _readBody(findResp);
+
+      if (findResp.statusCode != 200) {
+        return '获取商品数据失败 (HTTP ${findResp.statusCode})';
+      }
+
+      Map<String, dynamic> findData;
+      try {
+        findData = jsonDecode(findBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '商品数据解析失败';
+      }
+
+      final product = findData['product'] as Map<String, dynamic>?;
+      if (product == null) return '商品数据为空';
+
+      // 4. 修改名称字段
+      product['name'] = newNameTrim;
+      if (product.containsKey('productName')) {
+        product['productName'] = newNameTrim;
+      }
+
+      // 5. SaveProduct 保存
+      final productJson = jsonEncode(product);
+      final saveData = 'userId=$userId&productJson=${Uri.encodeComponent(productJson)}';
+
+      final saveUri = Uri.parse('$baseUrl/Product/SaveProduct');
+      final saveReq = await _httpClient.postUrl(saveUri);
+      saveReq.headers.set('User-Agent', _ua);
+      saveReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      saveReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      saveReq.headers.set('Origin', baseUrl);
+      saveReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      saveReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      saveReq.headers.set('Cookie', cookie);
+      saveReq.followRedirects = false;
+      saveReq.write(saveData);
+      final saveResp = await saveReq.close().timeout(const Duration(seconds: 15));
+      final saveBody = await _readBody(saveResp);
+
+      if (saveResp.statusCode != 200) {
+        return '保存失败 (HTTP ${saveResp.statusCode})';
+      }
+
+      try {
+        final saveResult = jsonDecode(saveBody) as Map<String, dynamic>;
+        if (saveResult['successed'] == true) {
+          return null; // 成功
+        }
+        return saveResult['msg'] as String? ?? '保存失败';
+      } catch (_) {
+        return '保存响应异常';
+      }
+    } catch (e) {
+      return '${store.name} 修改名称异常：${e.toString()}';
+    }
+  }
+  /// 更新商品操作记录，统一写入商品描述（description）：
+  /// 更新照片 / 更新库存 / 更新供货商 三行，各类型更新时只替换对应行，保持三行。
+  /// 返回 null 表示成功，否则返回错误信息。
+  Future<String?> updateProductOperationNote(
+    StoreConfig store,
+    String barcode,
+    String operatorName,
+    String actionLabel, {
+    String? productUid,
+  }) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return '条码为空';
+
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) return '未登录';
+
+    try {
+      // 1. 获取 userId
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return '无法获取门店信息';
+
+      // 2. 搜索条码获取 productId
+      final pageData = _encodeForm({
+        'userId': userId,
+        'enable': '1',
+        'productTagUidsJson': '[]',
+        'keyword': code,
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        'pageIndex': '1',
+        'pageSize': '20',
+        'orderColumn': '',
+        'asc': 'true',
+      });
+
+      final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+      final searchReq = await _httpClient.postUrl(searchUri);
+      searchReq.headers.set('User-Agent', _ua);
+      searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      searchReq.headers.set('Origin', baseUrl);
+      searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      searchReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      searchReq.headers.set('Cookie', cookie);
+      searchReq.followRedirects = false;
+      searchReq.write(pageData);
+      final searchResp = await searchReq.close().timeout(const Duration(seconds: 15));
+      final searchBody = await _readBody(searchResp);
+
+      if (searchResp.statusCode != 200) {
+        return '搜索失败 (HTTP ${searchResp.statusCode})';
+      }
+
+      Map<String, dynamic> searchData;
+      try {
+        searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '搜索返回格式异常';
+      }
+
+      final contentView = searchData['contentView'] as String? ?? '';
+      // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+      String? productId;
+      if (productUid != null && productUid.isNotEmpty) {
+        final uidRowRegex = RegExp(
+            r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+        for (final m in uidRowRegex.allMatches(contentView)) {
+          if (m.group(2) == productUid) {
+            productId = m.group(1);
+            break;
+          }
+        }
+      }
+      productId ??=
+          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+      if (productId == null) return '未找到该商品';
+
+      // 3. FindProduct 获取完整数据
+      final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+      final findReq = await _httpClient.postUrl(findUri);
+      findReq.headers.set('User-Agent', _ua);
+      findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      findReq.headers.set('Origin', baseUrl);
+      findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      findReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      findReq.headers.set('Cookie', cookie);
+      findReq.followRedirects = false;
+      findReq.write('productId=$productId');
+      final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+      final findBody = await _readBody(findResp);
+
+      if (findResp.statusCode != 200) {
+        return '获取商品数据失败 (HTTP ${findResp.statusCode})';
+      }
+
+      Map<String, dynamic> findData;
+      try {
+        findData = jsonDecode(findBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '商品数据解析失败';
+      }
+
+      final product = findData['product'] as Map<String, dynamic>?;
+      if (product == null) return '商品数据为空';
+
+      // 4. 合并记录：统一写入商品描述，同类型记录替换一行，无则追加，保持三行
+      const fieldName = 'description';
+      final now = DateTime.now();
+      final dateStr =
+          '${now.year}.${now.month.toString().padLeft(2, '0')}.${now.day.toString().padLeft(2, '0')}';
+      final newLine = '$dateStr $operatorName：$actionLabel';
+      final lines = ((product[fieldName] as String?) ?? '')
+          .split('\n')
+          .map((l) => l.trimRight())
+          .toList();
+      // 库存兼容旧行「修改商品库存」：任一写法命中都替换为「更新库存」
+      final idx = actionLabel == '更新库存'
+          ? lines.indexWhere(
+              (l) => l.contains('更新库存') || l.contains('修改商品库存'))
+          : lines.indexWhere((l) => l.contains(actionLabel));
+      if (idx >= 0) {
+        lines[idx] = newLine;
+      } else {
+        lines.add(newLine);
+      }
+      product[fieldName] =
+          lines.where((l) => l.trim().isNotEmpty).join('\n');
+
+      // 5. SaveProduct 保存
+      final productJson = jsonEncode(product);
+      final saveData = 'userId=$userId&productJson=${Uri.encodeComponent(productJson)}';
+
+      final saveUri = Uri.parse('$baseUrl/Product/SaveProduct');
+      final saveReq = await _httpClient.postUrl(saveUri);
+      saveReq.headers.set('User-Agent', _ua);
+      saveReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      saveReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      saveReq.headers.set('Origin', baseUrl);
+      saveReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      saveReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      saveReq.headers.set('Cookie', cookie);
+      saveReq.followRedirects = false;
+      saveReq.write(saveData);
+      final saveResp = await saveReq.close().timeout(const Duration(seconds: 15));
+      final saveBody = await _readBody(saveResp);
+
+      if (saveResp.statusCode != 200) {
+        return '保存失败 (HTTP ${saveResp.statusCode})';
+      }
+
+      try {
+        final saveResult = jsonDecode(saveBody) as Map<String, dynamic>;
+        if (saveResult['successed'] == true) {
+          return null; // 成功
+        }
+        return saveResult['msg'] as String? ?? '保存失败';
+      } catch (_) {
+        return '保存响应异常';
+      }
+    } catch (e) {
+      return '${store.name} 更新描述异常：${e.toString()}';
+    }
+  }
+
+  // ==================== 供货商 UID 缓存（静默获取） ====================
+
+  Future<Map<String, String>> _loadSupplierUidCache(String storeKey) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('$_supplierUidCachePrefix$storeKey');
+      if (raw == null || raw.isEmpty) return const {};
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      return data.map((k, v) => MapEntry(k, v.toString()));
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  Future<void> _saveSupplierUidCache(
+      String storeKey, Map<String, String> uidMap) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          '$_supplierUidCachePrefix$storeKey', jsonEncode(uidMap));
+    } catch (_) {
+      // 缓存失败不影响功能
+    }
+  }
+
+  /// 静默刷新某门店供货商 UID 映射并缓存（失败静默忽略，供补货同步供货商使用）
+  Future<void> silentRefreshSupplierUid(StoreConfig store) async {
+    try {
+      final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+      final cookie = await _sessionManager.getCookie(store.storeKey);
+      if (cookie == null || cookie.isEmpty) return;
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return;
+      final fetched = await _fetchSupplierUidMap(baseUrl, cookie, userId);
+      if (fetched.uidMap.isEmpty) return;
+      _supplierUidCache[store.storeKey] = fetched.uidMap;
+      await _saveSupplierUidCache(store.storeKey, fetched.uidMap);
+    } catch (_) {
+      // 静默忽略
+    }
+  }
+
+  /// 从银豹获取供货商名称→uid 映射
+  /// 首选 LoadSuppliers 全量列表（含未授权供货商）；失败回退 LoadSupplierDDLJson
+  /// 返回 (uidMap, error)：uidMap 非空即成功，error 为失败诊断信息
+  Future<({Map<String, String> uidMap, String error})> _fetchSupplierUidMap(
+    String baseUrl,
+    String cookie,
+    String userId,
+  ) async {
+    // 首选 LoadSuppliers 全量列表（与登录自动获取一致，含未授权供货商）；
+    // LoadSupplierDDLJson 只返回「已授权」下拉项，会漏掉未授权供货商（如 E115）
+    final primary = await _loadSupplierUidsFromView(baseUrl, cookie, userId);
+    if (primary.uidMap.isNotEmpty) return primary;
+
+    String diag = 'LoadSuppliers：${primary.error}';
+    try {
+      final req = await _httpClient
+          .postUrl(Uri.parse('$baseUrl/Supplier/LoadSupplierDDLJson'));
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Accept', 'application/json, text/javascript, */*');
+      req.headers.set('Referer', '$baseUrl/Product/Manage');
+      req.headers.set('Origin', baseUrl);
+      req.headers.set('X-Requested-With', 'XMLHttpRequest');
+      req.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      req.headers.set('Cookie', cookie);
+      req.followRedirects = false;
+      req.write(_encodeForm({'userId': userId, 'withNumber': 'true'}));
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        diag = '$diag；LoadSupplierDDLJson HTTP ${resp.statusCode}';
+      } else {
+        final body = await _readBody(resp);
+        final data = jsonDecode(body) as Map<String, dynamic>?;
+        if (data == null) {
+          diag = '$diag；LoadSupplierDDLJson 响应非 JSON';
+        } else {
+          final result = <String, String>{};
+          // 优先解析 suppliersJson（纯名称列表）
+          final suppliersJson = data['suppliersJson'];
+          if (suppliersJson is String && suppliersJson.isNotEmpty) {
+            try {
+              final list = jsonDecode(suppliersJson) as List<dynamic>;
+              for (final item in list) {
+                if (item is Map<String, dynamic>) {
+                  final name = (item['name'] ?? item['originalName'])?.toString();
+                  final uid = (item['uid'] ?? item['value'])?.toString();
+                  if (name != null && name.isNotEmpty && uid != null && uid.isNotEmpty) {
+                    result[name] = uid;
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+          // 回退解析 supplierDDL（text/value）
+          if (result.isEmpty) {
+            final ddl = data['supplierDDL'];
+            if (ddl is List) {
+              for (final item in ddl) {
+                if (item is Map<String, dynamic>) {
+                  final text = item['text']?.toString();
+                  final value = item['value']?.toString();
+                  if (text != null && value != null && value.isNotEmpty) {
+                    result[_htmlUnescape(text)] = value;
+                  }
+                }
+              }
+            }
+          }
+          if (result.isNotEmpty) {
+            return (uidMap: result, error: '');
+          }
+          diag = '$diag；LoadSupplierDDLJson 未解析到供货商';
+        }
+      }
+    } catch (e) {
+      diag = '$diag；LoadSupplierDDLJson 异常：$e';
+    }
+    return (uidMap: const <String, String>{}, error: diag);
+  }
+
+  /// 调用 LoadSuppliers 接口解析 data-name / data-uid 映射（全量，含未授权供货商）
+  /// 注意：必须传 supplierEnable=1，否则接口返回 HTTP 500
+  Future<({Map<String, String> uidMap, String error})> _loadSupplierUidsFromView(
+    String baseUrl,
+    String cookie,
+    String userId,
+  ) async {
+    try {
+      final req = await _httpClient.postUrl(Uri.parse('$baseUrl/Supplier/LoadSuppliers'));
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Accept', 'application/json, text/javascript, */*; q=0.01');
+      req.headers.set('Referer', '$baseUrl/Supplier/Manage');
+      req.headers.set('Origin', baseUrl);
+      req.headers.set('X-Requested-With', 'XMLHttpRequest');
+      req.headers.set('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
+      req.headers.set('Cookie', cookie);
+      req.followRedirects = false;
+      req.write(_encodeForm({
+        'supplierEnable': '1',
+        'businessMode': '',
+        'keyword': '',
+        'userId': userId,
+      }));
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        return (uidMap: const <String, String>{}, error: 'LoadSuppliers HTTP ${resp.statusCode}');
+      }
+      final body = await _readBody(resp);
+      final Object? decoded;
+      try {
+        decoded = jsonDecode(body);
+      } catch (_) {
+        return (uidMap: const <String, String>{}, error: 'LoadSuppliers 响应非 JSON');
+      }
+      final data = decoded as Map<String, dynamic>?;
+      final view = data?['view'] as String? ?? '';
+      if (view.isEmpty) {
+        return (uidMap: const <String, String>{}, error: 'LoadSuppliers view 为空');
+      }
+      final result = <String, String>{};
+      // 逐行提取 data-name / data-uid（不依赖属性先后顺序）
+      final trRegex = RegExp(r'<tr[^>]*>', caseSensitive: false);
+      final nameAttr = RegExp(r'data-name="([^"]+)"', caseSensitive: false);
+      final uidAttr = RegExp(r'data-uid="(\d+)"', caseSensitive: false);
+      for (final tr in trRegex.allMatches(view)) {
+        final tag = tr.group(0)!;
+        final nameM = nameAttr.firstMatch(tag);
+        final uidM = uidAttr.firstMatch(tag);
+        if (nameM == null || uidM == null) continue;
+        final name = nameM.group(1)!.trim();
+        final uid = uidM.group(1)!;
+        if (name.isNotEmpty && uid.isNotEmpty) {
+          result[_htmlUnescape(name)] = uid;
+        }
+      }
+      if (result.isEmpty) {
+        return (uidMap: const <String, String>{}, error: 'LoadSuppliers 表格未解析到 data-name/data-uid');
+      }
+      return (uidMap: result, error: '');
+    } catch (e) {
+      return (uidMap: const <String, String>{}, error: 'LoadSuppliers 异常：$e');
+    }
+  }
+
+  /// 供货商名称匹配：精确 → 规范化（忽略 &、空格、大小写）→ 词边界包含
+  static String? _matchSupplierUid(String name, Map<String, String> uidMap) {
+    final exact = uidMap[name];
+    if (exact != null) return exact;
+    final normalized = _normSupplierName(name);
+    for (final entry in uidMap.entries) {
+      if (_normSupplierName(entry.key) == normalized) {
+        return entry.value;
+      }
+    }
+    // 词边界包含匹配（如 "E115 - 某某"）
+    if (normalized.length < 2) return null;
+    final boundary = RegExp(r'[a-z0-9]');
+    for (final entry in uidMap.entries) {
+      final key = _normSupplierName(entry.key);
+      final idx = key.indexOf(normalized);
+      if (idx == -1) continue;
+      final before = idx > 0 ? key.substring(idx - 1, idx) : '';
+      final afterIdx = idx + normalized.length;
+      final after = afterIdx < key.length ? key.substring(afterIdx, afterIdx + 1) : '';
+      final boundaryOk = (before.isEmpty || !boundary.hasMatch(before)) &&
+          (after.isEmpty || !boundary.hasMatch(after));
+      if (boundaryOk && key.length - normalized.length <= 20) {
+        return entry.value;
+      }
+    }
+    return null;
+  }
+
+  /// 供货商名称规范化（用于容错匹配）
+  static String _normSupplierName(String s) => s
+      .replaceAll('&', '')
+      .replaceAll(' ', '')
+      .replaceAll('\u3000', '')
+      .toLowerCase();
+
+  /// 反转义常见 HTML 实体（供货商下拉文本、商品名称等）
+  static String _htmlUnescape(String input) {
+    return input
+        .replaceAll('&amp;', '&')
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#39;', "'")
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAllMapped(RegExp(r'&#x([0-9a-fA-F]+);'), (m) {
+          final cp = int.parse(m.group(1)!, radix: 16);
+          return String.fromCharCodes([cp]);
+        })
+        .replaceAllMapped(RegExp(r'&#(\d+);'), (m) {
+          final cp = int.parse(m.group(1)!);
+          return String.fromCharCodes([cp]);
+        });
+  }
+
+/// 上传商品图片到银豹（独立接口 /Product/UploadProductImage，与修改库存不同）
+/// 流程：搜索条码获取 productId → multipart 上传图片
+/// 返回 (error, imageUrl)：error 为 null 表示成功，imageUrl 为完整可显示的图片地址
+  Future<(String?, String?)> updateProductImage(
+    StoreConfig store,
+    String barcode,
+    List<int> imageBytes,
+    String imageName,
+  ) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return ('条码为空', null);
+
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) return ('未登录', null);
+
+    try {
+      // 1. 获取 userId
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return ('无法获取门店信息', null);
+
+      // 2. 搜索条码获取 productId
+      final pageData = _encodeForm({
+        'userId': userId,
+        'enable': '1',
+        'productTagUidsJson': '[]',
+        'keyword': code,
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        'pageIndex': '1',
+        'pageSize': '20',
+        'orderColumn': '',
+        'asc': 'true',
+      });
+
+      final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+      final searchReq = await _httpClient.postUrl(searchUri);
+      searchReq.headers.set('User-Agent', _ua);
+      searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      searchReq.headers.set('Origin', baseUrl);
+      searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      searchReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      searchReq.headers.set('Cookie', cookie);
+      searchReq.followRedirects = false;
+      searchReq.write(pageData);
+      final searchResp = await searchReq.close().timeout(const Duration(seconds: 15));
+      final searchBody = await _readBody(searchResp);
+
+      if (searchResp.statusCode != 200) {
+        return ('搜索失败 (HTTP ${searchResp.statusCode})', null);
+      }
+
+      Map<String, dynamic> searchData;
+      try {
+        searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+      } catch (_) {
+        return ('搜索返回格式异常', null);
+      }
+
+      final contentView = searchData['contentView'] as String? ?? '';
+      final productIdMatch = RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView);
+      if (productIdMatch == null) return ('未找到该商品', null);
+
+      final productId = productIdMatch.group(1)!;
+
+      // 3. 上传图片到银豹\uff08独立上传接口\uff0c不需要 SaveProduct）
+      final uploadUri = Uri.parse(
+          '$baseUrl/Product/UploadProductImage?userId=$userId&productId=$productId&forMulColorSize=false');
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 15);
+      final request = await client.postUrl(uploadUri);
+      final boundary = '----ImgBoundary${DateTime.now().millisecondsSinceEpoch}';
+      request.headers.set('User-Agent', _ua);
+      request.headers.set('Accept', 'application/json, text/javascript, */*');
+      request.headers.set('Referer', '$baseUrl/Product/Manage');
+      request.headers.set('Origin', baseUrl);
+      request.headers.set('X-Requested-With', 'XMLHttpRequest');
+      request.headers.contentType = ContentType(
+        'multipart',
+        'form-data',
+        parameters: {'boundary': boundary},
+      );
+      request.headers.set('Cookie', cookie);
+      request.followRedirects = false;
+
+      final body = <int>[];
+      body.addAll(utf8.encode('--$boundary\r\n'));
+      body.addAll(utf8.encode(
+          'Content-Disposition: form-data; name="file"; filename="$imageName"\r\n'));
+      body.addAll(utf8.encode('Content-Type: image/jpeg\r\n\r\n'));
+      body.addAll(imageBytes);
+      body.addAll(utf8.encode('\r\n--$boundary--\r\n'));
+      request.add(body);
+      final resp = await request.close().timeout(const Duration(seconds: 60));
+      final respBody = await _readBody(resp);
+
+      if (resp.statusCode != 200) {
+        return ('上传失败 (HTTP ${resp.statusCode})', null);
+      }
+
+      Map<String, dynamic> result;
+      try {
+        result = jsonDecode(respBody) as Map<String, dynamic>;
+      } catch (_) {
+        return ('上传响应解析失败：$respBody', null);
+      }
+      if (result['successed'] != true) {
+        return ('上传失败：$respBody', null);
+      }
+      final msg = result['msg']?.toString() ?? '';
+      if (msg.isEmpty) return ('上传失败：未返回图片路径', null);
+      final path = msg.startsWith('/') ? msg : '/$msg';
+      final imageUrl = '$_imageDomain$path';
+      return (null, imageUrl);
+    } catch (e) {
+      return ('上传图片异常：${e.toString()}', null);
+    }
+  }
+
+  /// 替换商品图片：先删除银豹商品全部旧图，再上传新图
+  /// 银豹支持一商品多张图片，仅上传新图不会优先显示，需先删除旧图再上传替换
+  /// 返回 (error, imageUrl)：error 为 null 表示成功，imageUrl 为完整可显示的图片地址
+  Future<(String?, String?)> replaceProductImage(
+    StoreConfig store,
+    String barcode,
+    List<int> imageBytes,
+    String imageName, {
+    String? productUid,
+  }) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return ('条码为空', null);
+
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) return ('未登录', null);
+
+    try {
+      // 1. 获取 userId
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return ('无法获取门店信息', null);
+
+      // 2. 搜索条码获取 productId
+      final pageData = _encodeForm({
+        'userId': userId,
+        'enable': '1',
+        'productTagUidsJson': '[]',
+        'keyword': code,
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        'pageIndex': '1',
+        'pageSize': '20',
+        'orderColumn': '',
+        'asc': 'true',
+      });
+
+      final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+      final searchReq = await _httpClient.postUrl(searchUri);
+      searchReq.headers.set('User-Agent', _ua);
+      searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      searchReq.headers.set('Origin', baseUrl);
+      searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      searchReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      searchReq.headers.set('Cookie', cookie);
+      searchReq.followRedirects = false;
+      searchReq.write(pageData);
+      final searchResp = await searchReq.close().timeout(const Duration(seconds: 15));
+      final searchBody = await _readBody(searchResp);
+
+      if (searchResp.statusCode != 200) {
+        return ('搜索失败 (HTTP ${searchResp.statusCode})', null);
+      }
+
+      Map<String, dynamic> searchData;
+      try {
+        searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+      } catch (_) {
+        return ('搜索返回格式异常', null);
+      }
+
+      final contentView = searchData['contentView'] as String? ?? '';
+      // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+      String? productId;
+      if (productUid != null && productUid.isNotEmpty) {
+        final uidRowRegex = RegExp(
+            r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+        for (final m in uidRowRegex.allMatches(contentView)) {
+          if (m.group(2) == productUid) {
+            productId = m.group(1);
+            break;
+          }
+        }
+      }
+      productId ??=
+          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+      if (productId == null) return ('未找到该商品', null);
+
+      // 3. FindProduct 获取商品旧图片列表（productimages[].id）
+      final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+      final findReq = await _httpClient.postUrl(findUri);
+      findReq.headers.set('User-Agent', _ua);
+      findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      findReq.headers.set('Origin', baseUrl);
+      findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      findReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      findReq.headers.set('Cookie', cookie);
+      findReq.followRedirects = false;
+      findReq.write('productId=$productId');
+      final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+      final findBody = await _readBody(findResp);
+
+      if (findResp.statusCode != 200) {
+        return ('获取商品数据失败 (HTTP ${findResp.statusCode})', null);
+      }
+
+      Map<String, dynamic> findData;
+      try {
+        findData = jsonDecode(findBody) as Map<String, dynamic>;
+      } catch (_) {
+        return ('商品数据解析失败', null);
+      }
+      final product = findData['product'] as Map<String, dynamic>?;
+      final oldImages = (product?['productimages'] as List?) ?? const <dynamic>[];
+
+      // 4. 删除全部旧图（任一张删除失败则中止，保证替换一致性）
+      for (final item in oldImages) {
+        if (item is! Map<String, dynamic>) continue;
+        final imgId = item['id']?.toString() ?? '';
+        if (imgId.isEmpty || imgId == '0') continue;
+        final delUri = Uri.parse('$baseUrl/Product/DeleteProductImage');
+        final delReq = await _httpClient.postUrl(delUri);
+        delReq.headers.set('User-Agent', _ua);
+        delReq.headers.set('Accept', 'application/json, text/javascript, */*');
+        delReq.headers.set('Referer', '$baseUrl/Product/Manage');
+        delReq.headers.set('Origin', baseUrl);
+        delReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+        delReq.headers.set('Content-Type',
+            'application/x-www-form-urlencoded; charset=UTF-8');
+        delReq.headers.set('Cookie', cookie);
+        delReq.followRedirects = false;
+        delReq.write(_encodeForm({
+          'productImageId': imgId,
+          'forMulColorSize': 'false',
+        }));
+        final delResp = await delReq.close().timeout(const Duration(seconds: 15));
+        if (delResp.statusCode != 200) {
+          return ('删除旧图失败 (HTTP ${delResp.statusCode})', null);
+        }
+        final delBody = await _readBody(delResp);
+        try {
+          final delResult = jsonDecode(delBody) as Map<String, dynamic>;
+          if (delResult['successed'] == false) {
+            return ('删除旧图失败：${delResult['msg'] ?? ''}', null);
+          }
+        } catch (_) {
+          // 响应非 JSON 时按成功处理
+        }
+      }
+
+      // 5. 上传新图（独立上传接口，不需要 SaveProduct）
+      final uploadUri = Uri.parse(
+          '$baseUrl/Product/UploadProductImage?userId=$userId&productId=$productId&forMulColorSize=false');
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 15);
+      final request = await client.postUrl(uploadUri);
+      final boundary = '----ImgBoundary${DateTime.now().millisecondsSinceEpoch}';
+      request.headers.set('User-Agent', _ua);
+      request.headers.set('Accept', 'application/json, text/javascript, */*');
+      request.headers.set('Referer', '$baseUrl/Product/Manage');
+      request.headers.set('Origin', baseUrl);
+      request.headers.set('X-Requested-With', 'XMLHttpRequest');
+      request.headers.contentType = ContentType(
+        'multipart',
+        'form-data',
+        parameters: {'boundary': boundary},
+      );
+      request.headers.set('Cookie', cookie);
+      request.followRedirects = false;
+
+      final body = <int>[];
+      body.addAll(utf8.encode('--$boundary\r\n'));
+      body.addAll(utf8.encode(
+          'Content-Disposition: form-data; name="file"; filename="$imageName"\r\n'));
+      body.addAll(utf8.encode('Content-Type: image/jpeg\r\n\r\n'));
+      body.addAll(imageBytes);
+      body.addAll(utf8.encode('\r\n--$boundary--\r\n'));
+      request.add(body);
+      final resp = await request.close().timeout(const Duration(seconds: 60));
+      final respBody = await _readBody(resp);
+
+      if (resp.statusCode != 200) {
+        return ('上传失败 (HTTP ${resp.statusCode})', null);
+      }
+
+      Map<String, dynamic> result;
+      try {
+        result = jsonDecode(respBody) as Map<String, dynamic>;
+      } catch (_) {
+        return ('上传响应解析失败：$respBody', null);
+      }
+      if (result['successed'] != true) {
+        return ('上传失败：$respBody', null);
+      }
+      final msg = result['msg']?.toString() ?? '';
+      if (msg.isEmpty) return ('上传失败：未返回图片路径', null);
+      final path = msg.startsWith('/') ? msg : '/$msg';
+      final imageUrl = '$_imageDomain$path';
+      return (null, imageUrl);
+    } catch (e) {
+      return ('替换图片异常：${e.toString()}', null);
+    }
+  }
+
+// 银豹 CDN 图片域名（后台 #imageDomain）
+  static const String _imageDomain = 'https://img.pospal.cn/';
+
   String _encodeForm(Map<String, String> data) {
     return data.entries
         .map((e) =>

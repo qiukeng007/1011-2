@@ -16,9 +16,9 @@ class SessionManager {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   /// 保存 Cookie
-  Future<void> saveCookie(String storeKey, String cookie) async {
+  Future<void> saveCookie(String storeKey, String cookie, {String via = ''}) async {
     final prefs = await SharedPreferences.getInstance();
-    final session = LoginSession(cookie: cookie);
+    final session = LoginSession(cookie: cookie, via: via);
     await prefs.setString(
       '$_cookiePrefix$storeKey',
       jsonEncode({
@@ -29,10 +29,34 @@ class SessionManager {
     );
   }
 
+  /// 总账号会话回退：门店没有单独保存 Cookie 时，
+  /// 使用同后台同账号的 master 会话（微信扫码登录总账号后所有门店共享）
+  static String? masterKeyOf(String storeKey) {
+    final parts = storeKey.split('|');
+    if (parts.length >= 3 && parts[1].isNotEmpty && parts[2] != 'master') {
+      return '${parts[0]}|${parts[1]}|master';
+    }
+    return null;
+  }
+
   /// 获取 Cookie
   Future<String?> getCookie(String storeKey) async {
     final prefs = await SharedPreferences.getInstance();
     final jsonStr = prefs.getString('$_cookiePrefix$storeKey');
+    if (jsonStr == null) {
+      // 总账号会话回退：门店未单独登录时使用账号级 master 会话
+      final masterKey = masterKeyOf(storeKey);
+      if (masterKey != null) {
+        return _readCookie(prefs, masterKey);
+      }
+      return null;
+    }
+    return _readCookie(prefs, storeKey);
+  }
+
+  /// 读取并校验指定 key 下保存的 Cookie（过期则删除）
+  Future<String?> _readCookie(SharedPreferences prefs, String key) async {
+    final jsonStr = prefs.getString('$_cookiePrefix$key');
     if (jsonStr == null) return null;
 
     try {
@@ -44,12 +68,12 @@ class SessionManager {
         createdAt: createdAt,
       );
       if (session.isExpired) {
-        await deleteCookie(storeKey);
+        await deleteCookie(key);
         return null;
       }
       return session.cookie;
     } catch (_) {
-      await deleteCookie(storeKey);
+      await deleteCookie(key);
       return null;
     }
   }

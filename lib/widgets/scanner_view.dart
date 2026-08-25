@@ -1,8 +1,19 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 /// 扫码器 — 实时扫码 + 图片导入识别
+
+/// Strips GS1 symbology identifier prefixes like ]C1, ]e0, etc.
+String _cleanBarcode(String raw_) {
+  if (raw_.startsWith(']C1')) return raw_.substring(3);
+  if (raw_.startsWith(']e0')) return raw_.substring(3);
+  if (raw_.startsWith(']E0')) return raw_.substring(3);
+  return raw_;
+}
+
 class ScannerView extends StatefulWidget {
   final void Function(String barcode) onDetect;
   final VoidCallback onClose;
@@ -58,7 +69,7 @@ class _ScannerViewState extends State<ScannerView>
     final value = barcode.rawValue;
     if (value == null || value.isEmpty || value.length < 6) return;
     _hasDetected = true;
-    widget.onDetect(value);
+    widget.onDetect(_cleanBarcode(value));
   }
 
   Future<void> _pickImage() async {
@@ -67,25 +78,19 @@ class _ScannerViewState extends State<ScannerView>
     final xfile = await picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 100,
+      maxWidth: 2000,
+      maxHeight: 2000,
     );
     if (xfile == null || !mounted) return;
 
     setState(() => _analyzing = true);
     try {
-      final capture = await _controller.analyzeImage(xfile.path);
+      final value = await _detectFromImage(xfile.path);
       if (!mounted) return;
-      if (capture != null) {
-        for (final barcode in capture.barcodes) {
-          if (barcode.format == BarcodeFormat.qrCode ||
-              barcode.format == BarcodeFormat.aztec ||
-              barcode.format == BarcodeFormat.dataMatrix) continue;
-          final value = barcode.rawValue;
-          if (value != null && value.isNotEmpty && value.length >= 6) {
-            _hasDetected = true;
-            widget.onDetect(value);
-            return;
-          }
-        }
+      if (value != null) {
+        _hasDetected = true;
+        widget.onDetect(_cleanBarcode(value));
+        return;
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -104,6 +109,69 @@ class _ScannerViewState extends State<ScannerView>
     } finally {
       if (mounted) setState(() => _analyzing = false);
     }
+  }
+
+  /// 识别图片中的条码：先整图识别，失败后分区域放大重试
+  Future<String?> _detectFromImage(String path) async {
+    final whole = await _analyzePath(path);
+    if (whole != null) return whole;
+
+// 2x2 区域（带 15% 重叠），覆盖图片任意位置的条码
+    try {
+      final bytes = File(path).readAsBytesSync();
+      final src = img.decodeImage(bytes);
+      if (src == null) return null;
+      const overlap = 0.15;
+      final w = src.width;
+      final h = src.height;
+      final xMidL = (w * (0.5 - overlap)).round();
+      final xMidR = (w * (0.5 + overlap)).round();
+      final yMidT = (h * (0.5 - overlap)).round();
+      final yMidB = (h * (0.5 + overlap)).round();
+      final regions = [
+        (0, 0, xMidR, yMidB),
+        (xMidL, 0, w, yMidB),
+        (0, yMidT, xMidR, h),
+        (xMidL, yMidT, w, h),
+      ];
+      final tmpDir = Directory.systemTemp;
+      for (final r in regions) {
+        final cropW = r.$3 - r.$1;
+        final cropH = r.$4 - r.$2;
+        if (cropW <= 0 || cropH <= 0) {
+          continue;
+        }
+        final crop = img.copyCrop(src, r.$1, r.$2, cropW, cropH);
+        final zoomed = img.copyResize(crop, width: cropW * 2, interpolation: img.Interpolation.linear);
+        final tmp = File('${tmpDir.path}/scan_region_${DateTime.now().microsecondsSinceEpoch}.png');
+        tmp.writeAsBytesSync(img.encodePng(zoomed));
+        final value = await _analyzePath(tmp.path);
+        tmp.deleteSync();
+        if (value != null) return value;
+      }
+    } catch (_) {
+// 区域识别异常时忽略，由上层提示
+    }
+    return null;
+  }
+
+  Future<String?> _analyzePath(String path) async {
+    try {
+      final capture = await _controller.analyzeImage(path);
+      if (capture == null) return null;
+      for (final barcode in capture.barcodes) {
+        if (barcode.format == BarcodeFormat.qrCode ||
+            barcode.format == BarcodeFormat.aztec ||
+            barcode.format == BarcodeFormat.dataMatrix) continue;
+        final value = barcode.rawValue;
+        if (value != null && value.isNotEmpty && value.length >= 6) {
+          return value;
+        }
+      }
+    } catch (_) {
+// 单次分析失败忽略，继续尝试其他方式
+    }
+    return null;
   }
 
   @override

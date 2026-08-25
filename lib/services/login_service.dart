@@ -13,6 +13,19 @@ import 'session_manager.dart';
 ///    参数：userName=账号:工号, password=密码, returnUrl, screenSize, employeeSignin=true
 /// 3. 解析返回 JSON：{ successed: true, msg: "重定向URL" }
 /// 4. 跟随重定向到商品管理页
+/// 供货商抓取结果：成功时 suppliers 非空；失败时 suppliers 为空并携带原因
+class SupplierFetchResult {
+  final List<String> suppliers;
+  final int? statusCode;
+  final String? error;
+
+  const SupplierFetchResult({
+    this.suppliers = const [],
+    this.statusCode,
+    this.error,
+  });
+}
+
 class LoginService {
   final SessionManager _sessionManager;
 
@@ -21,6 +34,277 @@ class LoginService {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   LoginService(this._sessionManager);
+
+  /// 登录成功后从银豹获取供货商名称列表
+  /// 优先调用 LoadSuppliers 接口（用门店 ID），失败回退页面 HTML 解析
+  Future<SupplierFetchResult> fetchSuppliers(StoreConfig config) async {
+    try {
+      final baseUrl = config.baseUrl.replaceAll(RegExp(r'/$'), '');
+      final cookie = await _sessionManager.getCookie(config.storeKey);
+      if (cookie == null || cookie.isEmpty) {
+        return const SupplierFetchResult(error: '本机无登录会话（请先在 APP 内登录）');
+      }
+
+      final client = HttpClient();
+      client.autoUncompress = true;
+      client.connectionTimeout = const Duration(seconds: 10);
+      try {
+        // ---- 0. 总账号模式：先切到目标门店会话（避免停在总店拿错门店供货商）----
+        if (config.storeId.isNotEmpty) {
+          try {
+            final warmReq = await client
+                .getUrl(Uri.parse('$baseUrl/Product/Manage?userId=${config.storeId}'));
+            warmReq.headers.set('User-Agent', _ua);
+            warmReq.headers.set('Accept', 'text/html,application/xhtml+xml');
+            warmReq.headers.set('Referer', '$baseUrl/Product/Manage');
+            warmReq.headers.set('Cookie', cookie);
+            warmReq.followRedirects = false;
+            final warmResp =
+                await warmReq.close().timeout(const Duration(seconds: 8));
+            await warmResp.drain<void>();
+          } catch (_) {}
+        }
+
+        // ---- 1. 抓取 Supplier/Manage 原始 HTML（提取门店 ID 与诊断）----
+        String pageBody = '';
+        final pageReq = await client.getUrl(Uri.parse('$baseUrl/Supplier/Manage'));
+        pageReq.headers.set('User-Agent', _ua);
+        pageReq.headers.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+        pageReq.headers.set('Referer', '$baseUrl/Product/Manage');
+        pageReq.headers.set('Cookie', cookie);
+        final pageResp = await pageReq.close().timeout(const Duration(seconds: 15));
+        if (pageResp.statusCode == 200) {
+          pageBody = await pageResp.transform(utf8.decoder).join();
+        }
+
+        // ---- 2. 用候选 ID 调用 LoadSuppliers 接口 ----
+        final cachedUserId = await _sessionManager.getUserId(config.storeKey);
+        final candidateIds = <String>{};
+        if (config.storeId.isNotEmpty) {
+          candidateIds.add(config.storeId);
+        }
+        if (cachedUserId != null && cachedUserId.isNotEmpty) {
+          candidateIds.add(cachedUserId);
+        }
+        final storeId = _extractStoreIdFromHtml(pageBody);
+        if (storeId != null && storeId.isNotEmpty) {
+          candidateIds.add(storeId);
+        }
+        final pageUserId = _extractCurrentUserId(pageBody);
+        if (pageUserId != null && pageUserId.isNotEmpty) {
+          candidateIds.add(pageUserId);
+        }
+        // 合并页面响应中的 Set-Cookie，保持会话最新（银豹会在响应中刷新会话）
+        var postCookie = cookie;
+        final setCookies = pageResp.headers['set-cookie'];
+        if (setCookies != null && setCookies.isNotEmpty) {
+          postCookie = _mergeSetCookie(cookie, pageResp.headers);
+        }
+        final apiErrors = <String>[];
+        // 依次用候选门店 ID 调用（LoadSuppliers 需要 userId + supplierEnable=1）
+        for (final id in candidateIds) {
+          final api = await _loadSuppliersViaApi(client, baseUrl, postCookie, id);
+          if (api.suppliers.isNotEmpty) {
+            final apiList = api.suppliers.toList()..sort();
+            return SupplierFetchResult(suppliers: apiList);
+          }
+          if (api.error != null && api.error!.isNotEmpty) {
+            apiErrors.add('id=$id：${api.error}');
+          }
+        }
+
+        // ---- 2.5 若接口 500（会话 Token 可能过期），重新登录刷新会话后重试一次 ----
+        if (apiErrors.any((e) => e.contains('HTTP 500'))) {
+          try {
+            await login(config);
+          } catch (_) {}
+          final newCookie = await _sessionManager.getCookie(config.storeKey);
+          if (newCookie != null && newCookie.isNotEmpty && newCookie != cookie) {
+            final retry = await _loadSuppliersViaApi(client, baseUrl, newCookie, null);
+            if (retry.suppliers.isNotEmpty) {
+              final retryList = retry.suppliers.toList()..sort();
+              return SupplierFetchResult(suppliers: retryList);
+            }
+            if (retry.error != null && retry.error!.isNotEmpty) {
+              apiErrors.add('重登后重试：${retry.error}');
+            }
+          } else {
+            apiErrors.add('重登后 Cookie 未变化，跳过重试');
+          }
+        }
+
+        // ---- 3. 页面 HTML 直接解析（服务端渲染时可用）----
+        final suppliers = <String>{};
+        final nameAttrRegex = RegExp(
+          r'<tr[^>]*data-name="([^"]+)"',
+          caseSensitive: false,
+        );
+        for (final m in nameAttrRegex.allMatches(pageBody)) {
+          final name = m.group(1)!.trim();
+          if (name.isNotEmpty && name.length < 50) suppliers.add(name);
+        }
+        if (suppliers.isEmpty) {
+          final rowRegex = RegExp(
+            r'<tr[^>]*data="(\d+)"[^>]*data-uid="(\d+)"[^>]*>([\s\S]*?)</tr>',
+            caseSensitive: false,
+          );
+          for (final m in rowRegex.allMatches(pageBody)) {
+            final rowHtml = m.group(3)!;
+            final tds = RegExp(r'<td[^>]*>([^<]*)</td>').allMatches(rowHtml).toList();
+            if (tds.length >= 4) {
+              final name = tds[3].group(1)!.trim();
+              if (name.isNotEmpty && name.length < 50) suppliers.add(name);
+            }
+          }
+        }
+        if (suppliers.isNotEmpty) {
+          final list = suppliers.toList()..sort();
+          return SupplierFetchResult(suppliers: list);
+        }
+
+        // ---- 4. 全部失败：输出详细诊断 ----
+        // 提取页面关键片段用于诊断
+        String storeOptionsSnippet = '无';
+        final soIdx = pageBody.indexOf('storeOptions');
+        if (soIdx >= 0) {
+          storeOptionsSnippet = pageBody.substring(
+            soIdx > 120 ? soIdx - 120 : 0,
+            (soIdx + 300) < pageBody.length ? soIdx + 300 : pageBody.length,
+          ).replaceAll('\r', '').replaceAll('\n', ' ');
+        }
+        String currentUserIdSnippet = '无';
+        final cuIdx = pageBody.indexOf('currentUserId');
+        if (cuIdx >= 0) {
+          currentUserIdSnippet = pageBody.substring(
+            cuIdx > 60 ? cuIdx - 60 : 0,
+            (cuIdx + 200) < pageBody.length ? cuIdx + 200 : pageBody.length,
+          ).replaceAll('\r', '').replaceAll('\n', ' ');
+        }
+        final diag = <String>[
+          '页面长度 ${pageBody.length}',
+          '含 data-name ${pageBody.contains('data-name')}',
+          'currentUserId $pageUserId',
+          'storeId $storeId',
+          '缓存 userId $cachedUserId',
+          'storeOptions 片段：$storeOptionsSnippet',
+          'currentUserId 片段：$currentUserIdSnippet',
+        ];
+        if (apiErrors.isNotEmpty) {
+          diag.add('接口结果：${apiErrors.join(' | ')}');
+        }
+        return SupplierFetchResult(
+          error: '获取供货商失败（${diag.join('；')}）',
+        );
+      } finally {
+        client.close();
+      }
+    } catch (e) {
+      return SupplierFetchResult(error: '$e');
+    }
+  }
+
+  /// 从 Supplier/Manage 页面 HTML 提取门店 ID（hf_storeId / data-storeid / storeId）
+  String? _extractStoreIdFromHtml(String body) {
+    final m1 = RegExp(r'id="hf_storeId"\s+value="(\d+)"', caseSensitive: false).firstMatch(body);
+    if (m1 != null) return m1.group(1);
+    final m2 = RegExp(r'''data-storeid\s*=\s*['"](\d+)['"]''', caseSensitive: false).firstMatch(body);
+    if (m2 != null) return m2.group(1);
+    final m3 = RegExp(r'var\s+storeId\s*=\s*(\d+)\s*;', caseSensitive: false).firstMatch(body);
+    if (m3 != null) return m3.group(1);
+    final m4 = RegExp(r'''storeId['"]?\s*[:=]\s*['"]?(\d+)''', caseSensitive: false).firstMatch(body);
+    if (m4 != null) return m4.group(1);
+    return null;
+  }
+
+  /// 从页面 HTML 提取 currentUserId
+  String? _extractCurrentUserId(String body) {
+    final m1 = RegExp(r'var\s+currentUserId\s*=\s*(\d+)\s*;', caseSensitive: false).firstMatch(body);
+    if (m1 != null) return m1.group(1);
+    final m2 = RegExp(r'''currentUserId['"]?\s*[:=]\s*['"]?(\d+)''', caseSensitive: false).firstMatch(body);
+    if (m2 != null) return m2.group(1);
+    return null;
+  }
+
+  /// 调用银豹 LoadSuppliers 接口获取供货商表格 HTML（优先于页面解析）
+  /// 返回 suppliers（非空即成功）与 error（失败原因）
+  Future<({Set<String> suppliers, String? error})> _loadSuppliersViaApi(
+    HttpClient client,
+    String baseUrl,
+    String cookie,
+    String? userId,
+  ) async {
+    try {
+      final req = await client.postUrl(Uri.parse('$baseUrl/Supplier/LoadSuppliers'));
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Accept', 'application/json, text/javascript, */*; q=0.01');
+      req.headers.set('Referer', '$baseUrl/Supplier/Manage');
+      req.headers.set('Cookie', cookie);
+      req.headers.set('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
+      req.headers.set('X-Requested-With', 'XMLHttpRequest');
+      // 参数：userId（门店 ID）与 supplierEnable=1（启用筛选）必传，否则接口 500
+      final fields = <String, String>{
+        'supplierEnable': '1',
+        'keyword': '',
+      };
+      if (userId == null || userId.isEmpty) {
+        return (suppliers: <String>{}, error: '缺少门店 ID（userId）');
+      }
+      fields['userId'] = userId;
+      final formBody = fields.entries
+          .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+          .join('&');
+      req.write(formBody);
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        String errBody = '';
+        try {
+          errBody = await resp.transform(utf8.decoder).join();
+        } catch (_) {}
+        if (errBody.length > 300) errBody = errBody.substring(0, 300);
+        return (
+          suppliers: <String>{},
+          error: 'LoadSuppliers 接口 HTTP ${resp.statusCode}，请求体：$formBody，Cookie（前 600 字符）：${cookie.length > 600 ? cookie.substring(0, 600) : cookie}，响应：$errBody',
+        );
+      }
+      final jsonText = await resp.transform(utf8.decoder).join();
+      final Object? decoded;
+      try {
+        decoded = jsonDecode(jsonText);
+      } catch (_) {
+        return (
+          suppliers: <String>{},
+          error: 'LoadSuppliers 返回非 JSON（前 200 字符：${jsonText.length > 200 ? jsonText.substring(0, 200) : jsonText}）',
+        );
+      }
+      if (decoded is! Map) {
+        return (suppliers: <String>{}, error: 'LoadSuppliers 返回格式异常（${decoded.runtimeType}）');
+      }
+      final successed = decoded['successed'];
+      final msg = decoded['msg'];
+      final view = decoded['view'];
+      if (view is! String || view.isEmpty) {
+        return (
+          suppliers: <String>{},
+          error: 'LoadSuppliers 返回 view 为空（successed=$successed，msg=$msg）',
+        );
+      }
+      final suppliers = <String>{};
+      final nameRegex = RegExp(r'<tr[^>]*data-name="([^"]+)"', caseSensitive: false);
+      for (final m in nameRegex.allMatches(view)) {
+        final name = m.group(1)!.trim();
+        if (name.isNotEmpty && name.length < 50) suppliers.add(name);
+      }
+      if (suppliers.isEmpty) {
+        return (
+          suppliers: <String>{},
+          error: 'LoadSuppliers 表格中未找到 data-name（view 长度 ${view.length}）',
+        );
+      }
+      return (suppliers: suppliers, error: null);
+    } catch (e) {
+      return (suppliers: <String>{}, error: 'LoadSuppliers 异常：$e');
+    }
+  }
 
   /// 登录门店
   /// 返回 LoginSession（含 Cookie）

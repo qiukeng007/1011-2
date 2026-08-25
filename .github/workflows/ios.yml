@@ -24,3 +24,4 @@ jobs:
         with:
           name: cash-carry-v1.0.9-ios-unsigned
           path: cash-carry-v1.0.9-ios-unsigned.ipa
+          retention-days: 3

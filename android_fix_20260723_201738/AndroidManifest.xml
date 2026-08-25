@@ -49,10 +49,6 @@
         <service
             android:name=".KeepAliveService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="keep_alive_for_store_session_maintenance" />
-        </service>
+            android:foregroundServiceType="specialUse" />
     </application>
 </manifest>

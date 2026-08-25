@@ -1,0 +1,90 @@
+=== product_result ProductData fields ===
+class ProductData {
+  final String barcode;
+  final String name;
+  final String specification;
+  final String category;
+  final double? stock;
+  final String unit;
+  final String supplier;
+  final double? sellPrice;
+  final double? buyPrice;
+  final dynamic uid;
+
+  /// 多条结果标记
+  final int? multipleMatches;
+
+  /// 调试字段
+  final String? rawKeys;
+  final String? numericFields;
+  final bool parseFailed;
+  final bool fromBrowser;
+
+  /// HTML 表格所有列原始数据（用于调试列索引偏移问题）
+  final String? allColumns;
+
+  const ProductData({
+    required this.barcode,
+    this.name = '',
+    this.specification = '',
+    this.category =
+
+=== query_service product map ===
+final product = <String, dynamic>{
+        'uid': uid,
+        'name': colVal(tds, 'name') ?? '',
+        'barcode': colVal(tds, 'barcode') ?? '',
+        'attribute4': colVal(tds, 'attribute4') ?? '', // 货号
+        'extBarcode': colVal(tds, 'extBarcode') ?? '',
+        'brandName': colVal(tds, 'brandName') ?? '',
+        'specification': colVal(tds, 'attribute6') ?? '', // 规格
+        'pinyin': colVal(tds, 'pinyin') ?? '',
+        'category': colVal(tds, 'categoryName') ?? '',
+        'stock': _parseNum(colVal(tds, 'stock') ?? ''),
+        'unit': colVal(tds, 'baseUnitName') ?? '—',
+        'sellPrice': _parseNum(colVal(tds, 'sellPrice') ?? ''),
+        'buyPrice': _pa
+
+=== query_service ProductData construction ===
+final product = ProductData(
+        barcode: hit['barcode'] ?? code,
+        name: hit['name'] ?? '',
+        specification: hit['specification'] ?? '',
+        category: hit['category'] ?? '',
+        stock: hit['stock'],
+        unit: hit['unit'] ?? '—',
+        supplier: hit['supplier'] ?? '',
+        sellPrice: hit['sellPrice'],
+        buyPrice: hit['buyPrice'],
+        uid: hit['uid'],
+        multipleMatches: matched.length > 1 ? matched.length : null,
+        allColumns: allCols,
+      );
+
+      return ProductResult(ok: true, data: product);
+    } catch (e) {
+      
+
+=== legacy parser head ===
+List<Map<String, dynamic>> _parseProductTableLegacy(String html) {
+    final products = <Map<String, dynamic>>[];
+
+    final rowRegex = RegExp(
+      r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>([\s\S]*?)</tr>',
+      caseSensitive: false,
+    );
+
+    for (final rowMatch in rowRegex.allMatches(html)) {
+      final uid = rowMatch.group(2);
+      final rowHtml = rowMatch.group(3) ?? '';
+
+      final tdRegex = RegExp(
+        r'<td[^>]*>([\s\S]*?)</td>',
+        caseSensitive: false,
+      );
+      final tds = tdRegex.allMatches(rowHtml).map((m) =>
+          _stripHtml(m.group(1)?.trim() ?? '')).toList();
+
+      if (tds.length < 15) continue;
+
+      final allColsBuf = Stri

@@ -1,0 +1,47 @@
+=== printer_widgets code128 ===
+eight.w600)),
+            const SizedBox(width: 4),
+            DropdownButton<String>(
+              value: _p.barcodeType,
+              items: const [
+                DropdownMenuItem(value: 'code128', child: Text('Code128', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'ean13', child: Text('EAN13', style: TextStyle(fontSize: 12))),
+              ],
+              onChanged: (v) => setState(() => _p = _p.copyWith(barcodeType: v ?? 'code128')),
+            ),
+            const SizedBox(width: 12),
+            const Text('字体:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            const SizedBox(width: 8),
+            DropdownB
+
+=== printer_widgets Code128 ===
+    const SizedBox(width: 4),
+            DropdownButton<String>(
+              value: _p.barcodeType,
+              items: const [
+                DropdownMenuItem(value: 'code128', child: Text('Code128', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'ean13', child: Text('EAN13', style: TextStyle(fontSize: 12))),
+              ],
+              onChanged: (v) => setState(() => _p = _p.copyWith(barcodeType: v ?? 'code128')),
+            ),
+            const SizedBox(width: 12),
+            const Text('字体:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            const SizedBox(width: 8),
+            DropdownButton<int>(
+          
+
+=== printer_widgets ean13 ===
+e: _p.barcodeType,
+              items: const [
+                DropdownMenuItem(value: 'code128', child: Text('Code128', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'ean13', child: Text('EAN13', style: TextStyle(fontSize: 12))),
+              ],
+              onChanged: (v) => setState(() => _p = _p.copyWith(barcodeType: v ?? 'code128')),
+            ),
+            const SizedBox(width: 12),
+            const Text('字体:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            const SizedBox(width: 8),
+            DropdownButton<int>(
+              value: _p.fontPreset,
+              items: const [
+                DropdownMenuI

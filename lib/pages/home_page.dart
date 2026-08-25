@@ -15,6 +15,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
 import '../services/update_service.dart';
 import '../services/foreground_service.dart';
+import '../services/keepalive_logger.dart';
+import '../models/keepalive_log.dart';
 import '../utils/constants.dart';
 import 'settings_page.dart';
 import 'query_page.dart';
@@ -68,6 +70,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _serverCheckTimer;
   Timer? _keepAliveTimer;
   RestockPrefillData? _prefillData;
+  bool _silentSupplierFetched = false;
+  int _settingsRefreshTick = 0;
+  final ValueNotifier<({String barcode, String imageUrl})?> _restockImageNotifier =
+      ValueNotifier(null);
+  final ValueNotifier<({String barcode, String supplier})?> _restockSupplierNotifier =
+      ValueNotifier(null);
   DateTime? _lastResumeRefreshTime;
   static const _resumeRefreshDebounce = Duration(seconds: 60);
 
@@ -83,6 +91,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _serverCheckTimer?.cancel();
     _keepAliveTimer?.cancel();
+    _restockImageNotifier.dispose();
+    _restockSupplierNotifier.dispose();
     _pageController.dispose();
     super.dispose();
   }
@@ -94,11 +104,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
         // App 进入后台 → 启动前台服务保活
-        ForegroundService.start();
+        final fgNow = DateTime.now();
+        ForegroundService.start().then((ok) {
+          KeepAliveLogger().add(KeepAliveLogEntry(
+            timestamp: fgNow,
+            event: ok ? 'started' : 'start_failed',
+            detail: ok ? 'Foreground service started' : 'Foreground service start returned false',
+            success: ok,
+          ));
+          if (!ok) {
+            debugPrint('[KeepAlive] foreground service start failed');
+          }
+        });
         break;
       case AppLifecycleState.resumed:
         // App 回到前台 → 停止前台服务 + 刷新会话
         ForegroundService.stop();
+        KeepAliveLogger().add(KeepAliveLogEntry(
+          timestamp: DateTime.now(),
+          event: 'stopped',
+          detail: 'Foreground service stopped (app resumed)',
+          success: true,
+        ));
         final now = DateTime.now();
         if (_lastResumeRefreshTime == null ||
             now.difference(_lastResumeRefreshTime!) > _resumeRefreshDebounce) {
@@ -191,7 +218,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _verifyList.clear();
     final validConfigs = <StoreConfig>[];
     for (final config in configs) {
-      if (!config.isValid) continue;
+      if (!config.enabled) continue; // 只验证勾选了搜索的门店
+      if (config.storeId.isEmpty && !config.isValid) continue; // 总账号同步门店无需工号密码
       _verifyList.add(_StoreVerifyStatus(name: config.name));
       validConfigs.add(config);
     }
@@ -226,6 +254,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+
   Future<void> _verifyOneStore(int i, StoreConfig config) async {
     final isValid = await _sessionManager.isCookieValid(
       config.storeKey,
@@ -238,9 +267,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
-    // Cookie 过期，自动重新登录
+    // Cookie 过期，自动重新登录（工号）；未配置工号密码则提示微信扫码登录
     _updateVerify(i, _VerifyState.expired, '登录已过期');
     await Future.delayed(const Duration(milliseconds: 300));
+    if (!config.isValid) {
+      _updateVerify(i, _VerifyState.failed, '请到设置页用微信扫码登录');
+      return;
+    }
     _updateVerify(i, _VerifyState.loggingIn, '正在重新登录…');
 
     try {
@@ -253,7 +286,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _verifiedKeys.add(config.storeKey);
       _updateVerify(i, _VerifyState.valid, '重新登录成功 ✓');
     } catch (_) {
-      _updateVerify(i, _VerifyState.failed, '自动登录失败，请手动登录');
+      _updateVerify(i, _VerifyState.failed, '自动登录失败，请用微信扫码登录');
     }
   }
 
@@ -444,7 +477,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _startKeepAlive() {
     _keepAliveTimer?.cancel();
-    _keepAliveTimer = Timer.periodic(const Duration(minutes: 10), (_) {
+    // 微信扫码登录可长期在线，无需频繁验证；改为 1 小时检查一次
+    _keepAliveTimer = Timer.periodic(const Duration(minutes: 60), (_) {
       _refreshSessions();
     });
     // 首次也执行一次
@@ -454,7 +488,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 刷新所有门店会话（保活 + 过期自动重登）
   Future<void> _refreshSessions() async {
     for (final config in _configs) {
-      if (!config.isValid) continue;
+      if (config.storeId.isEmpty && !config.isValid) continue;
       await _refreshStoreSession(config);
     }
   }
@@ -463,14 +497,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _refreshSessionsOnResume() async {
     final expired = <String>[];
     for (final config in _configs) {
-      if (!config.isValid) continue;
+      if (config.storeId.isEmpty && !config.isValid) continue;
       final ok = await _refreshStoreSession(config);
       if (!ok) expired.add(config.name);
     }
     if (mounted) {
       setState(() => _sessionRefreshKey++);
       if (_configs.isNotEmpty) {
-        final total = _configs.where((c) => c.isValid).length;
+        final total = _configs
+            .where((c) => c.enabled && (c.storeId.isNotEmpty || c.isValid))
+            .length;
         if (expired.isEmpty && total > 0) {
           _autoLoginMessage = '会话已刷新 ($total个门店)';
         } else if (expired.isNotEmpty) {
@@ -544,6 +580,57 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _currentTab = 1;
     });
     _pageController.animateToPage(1, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+    _maybeSilentFetchSuppliers();
+  }
+
+  /// 静默获取供货商（每次启动仅一次）
+  /// 供货商列表为手动模式时：缓存名称→UID 映射，并更新为银豹排序列表且只读
+  void _maybeSilentFetchSuppliers() {
+    if (_silentSupplierFetched) return;
+    _silentSupplierFetched = true;
+    _silentFetchSuppliers();
+  }
+
+  Future<void> _silentFetchSuppliers() async {
+    var processed = 0;
+    try {
+      final manualMode = _restockService?.suppliersManualMode ?? false;
+      if (!manualMode) return;
+      var listUpdated = false;
+      for (final store in _configs) {
+        if (!store.enabled) continue;
+        if (!await _sessionManager.isCookieValid(store.storeKey, store.baseUrl)) {
+          continue;
+        }
+        processed++;
+        // 静默缓存供货商名称→UID 映射（补货提交同步供货商时优先使用）
+        await _queryService.silentRefreshSupplierUid(store);
+        if (listUpdated) continue;
+        // 静默获取供货商列表（全局配置，任一门店成功即可）
+        final result = await _loginService.fetchSuppliers(store);
+        if (result.suppliers.isEmpty) continue;
+        final current = await _configService.loadRestockConfig();
+        final updated = current.copyWith(
+          suppliers: result.suppliers.join(','),
+          suppliersReadonly: true,
+        );
+        await _configService.saveRestockConfig(updated);
+        listUpdated = true;
+        if (mounted) {
+          setState(() {
+            _restockService = RestockService(updated);
+            _settingsRefreshTick++;
+          });
+        }
+      }
+      if (processed == 0) {
+        // 没有可用的已登录门店时，允许下次再触发
+        _silentSupplierFetched = false;
+      }
+    } catch (_) {
+      // 静默失败不影响主流程
+      if (processed == 0) _silentSupplierFetched = false;
+    }
   }
 
   Widget _buildVerifyBanner() {
@@ -693,7 +780,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           PageView(
             controller: _pageController,
-            onPageChanged: (i) => setState(() => _currentTab = i),
+            onPageChanged: (i) {
+              setState(() => _currentTab = i);
+              // 打开配置页也触发静默获取供货商（手动模式下仅一次）
+              if (i == 3) _maybeSilentFetchSuppliers();
+            },
             children: [
               // Tab 0: 查询（默认首页）
               QueryPage(
@@ -705,6 +796,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 onNavigateToRestock: _navigateToRestock,
                 verifiedKeys: _verifiedKeys,
                 verifying: _verifying,
+                imageUpdateNotifier: _restockImageNotifier,
+                supplierUpdateNotifier: _restockSupplierNotifier,
+                supplierOptions: _restockService?.suppliers ?? [],
               ),
               // Tab 1: 补货
               if (_restockService != null)
@@ -715,6 +809,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   onPrefillConsumed: () => setState(() => _prefillData = null),
                   queryService: _queryService,
                   configs: _configs,
+                  onImageUploaded: (barcode, imageUrl) => _restockImageNotifier.value =
+                      (barcode: barcode, imageUrl: imageUrl),
+                  onSupplierSynced: (barcode, supplier) =>
+                      _restockSupplierNotifier.value =
+                          (barcode: barcode, supplier: supplier),
                   onSubmitted: () {
                     _pageController.animateToPage(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
                     setState(() {
@@ -733,6 +832,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 loginService: _loginService,
                 sessionManager: _sessionManager,
                 onConfigChanged: _onConfigChanged,
+                refreshTick: _settingsRefreshTick,
               ),
             ],
           ),

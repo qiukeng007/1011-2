@@ -1,0 +1,712 @@
+=== aztec.dart ===
+--- class Barcode ---
+// Aztec
+///
+/// Named after the resemblance of the central finder pattern to an
+/// Aztec pyramid.
+class BarcodeAztec extends Barcode2D {
+  /// Create a [BarcodeAztec] object
+  const BarcodeAztec(
+    this.minECCPercent,
+    this.userSpecifiedLayers,
+  )   : assert(minECCPercent >= 0 && minECCPercent <= 100),
+        assert(userSpecifiedLayers >= 0);
+
+  /// Default Error correction percent
+  static const defaultEcPercent = 33;
+
+  /// Default number of layers
+  static const defaultLayers = 0;
+
+ 
+
+=== barcode.dart ===
+--- toSvg ---
+    }
+    }
+  }
+
+  /// Create an SVG file with this Barcode from String data
+  @nonVirtual
+  String toSvg(
+    String data, {
+    double x = 0,
+    double y = 0,
+    double width = 200,
+    double height = 80,
+    bool drawText = true,
+    String fontFamily = 'monospace',
+    double? fontHeight,
+    double? textPadding,
+    int color = 0x000000,
+    bool fullSvg = true,
+    double baseline = .75,
+  }) {
+    fontHeight ??= height * 0.2;
+    textPadding ??= height * 0.05;
+
+    final recipe = make(
+
+--- class Barcode ---
+en.dart';
+import 'upca.dart';
+import 'upce.dart';
+
+/// Barcode generation class
+@immutable
+abstract class Barcode {
+  /// Abstract constructor
+  const Barcode();
+
+  /// Create a specific [Barcode] instance based on the [BarcodeType]
+  /// this uses only the default barcode settings.
+  /// For finer-grained usage, use the static methods:
+  /// * Barcode.code39()
+  /// * Barcode.code93()
+  /// * Barcode.code128()
+  /// * ...
+  factory Barcode.fromType(BarcodeType type) {
+    switch (type) {
+      
+
+=== barcode_1d.dart ===
+--- class Barcode ---
+rcode.dart';
+import 'barcode_operations.dart';
+
+/// One Dimension Barcode generation class
+abstract class Barcode1D extends Barcode {
+  /// Create a [Barcode1D] object
+  const Barcode1D();
+
+  /// Default padding between text and barcode
+  static const defaultTextPadding = 0.0;
+
+  @override
+  Iterable<BarcodeElement> makeBytes(
+    Uint8List data, {
+    required double width,
+    required double height,
+    bool drawText = false,
+    double? fontHeight,
+    double? textPadding,
+  }) sync* {
+    a
+
+=== barcode_2d.dart ===
+--- class Barcode ---
+ode_exception.dart';
+import 'barcode_operations.dart';
+
+/// Matrix representing the raw code pixels
+class Barcode2DMatrix {
+  /// Create a 2d barcode matrix
+  const Barcode2DMatrix(this.width, this.height, this.ratio, this.pixels);
+
+  /// Create a 2d barcode matrix from a function callback
+  factory Barcode2DMatrix.fromXY(
+    int width,
+    int height,
+    double ratio,
+    bool Function(int x, int y) isDark,
+  ) =>
+      Barcode2DMatrix(
+          width,
+          height,
+          ratio,
+    
+
+=== barcode_exception.dart ===
+--- class Barcode ---
+tations under the License.
+ */
+
+/// [Exception] raised if the library cannot generate the [Barcode]
+class BarcodeException implements Exception {
+  /// Create a [BarcodeException] object
+  const BarcodeException(this.message);
+
+  /// Error message
+  final String message;
+
+  @override
+  String toString() => '$runtimeType: $message';
+}
+
+
+=== barcode_hm.dart ===
+--- class Barcode ---
+  /// Both ascender and descender
+  full,
+}
+
+/// Height Modulated Barcode generation class
+abstract class BarcodeHM extends Barcode1D {
+  /// Create a [BarcodeHM] object
+  const BarcodeHM({double tracker = 0.3}) : _tracker = tracker;
+
+  final double _tracker;
+
+  @override
+  Iterable<BarcodeElement> makeBytes(
+    Uint8List data, {
+    required double width,
+    required double height,
+    bool drawText = false,
+    double? fontHeight,
+    double? textPadding,
+  }) sync* {
+    assert(width > 0);
+
+
+=== barcode_maps.dart ===
+--- class Barcode ---
+ permissions and
+ * limitations under the License.
+ */
+
+// ignore_for_file: public_member_api_docs
+
+class BarcodeMaps {
+  /// Code 39 conversion bits
+  static const code39 = <int, int>{
+    0x30: 0xb65, // 0
+    0x31: 0xd4b, // 1
+    0x32: 0xd4d, // 2
+    0x33: 0xa9b, // 3
+    0x34: 0xd65, // 4
+    0x35: 0xacb, // 5
+    0x36: 0xacd, // 6
+    0x37: 0xda5, // 7
+    0x38: 0xb4b, // 8
+    0x39: 0xb4d, // 9
+    0x41: 0xd2b, // A
+    0x42: 0xd2d, // B
+    0x43: 0xa5b, // C
+    0x44: 0xd35, // D
+    0x
+
+=== barcode_operations.dart ===
+--- class Barcode ---
+ge governing permissions and
+ * limitations under the License.
+ */
+
+/// [Barcode] drawing operation
+class BarcodeElement {
+  /// Create a [Barcode] drawing operation
+  const BarcodeElement({
+    required this.left,
+    required this.top,
+    required this.width,
+    required this.height,
+  });
+
+  /// left position of this element
+  final double left;
+
+  /// top position of this element
+  final double top;
+
+  /// width of this element
+  final double width;
+
+  /// height of this element
+  final do
+
+=== codabar.dart ===
+--- class Barcode ---
+ forms such as FedEx airbills and blood bank forms,
+/// where variants are still in use as of 2007.
+class BarcodeCodabar extends Barcode1D {
+  /// Create a Codabar Barcode
+  const BarcodeCodabar(
+    this.start,
+    this.stop,
+    this.printStartStop,
+    this.explicitStartStop,
+  );
+
+  /// Start symbol to use
+  final BarcodeCodabarStartStop start;
+
+  /// Stop symbol to use
+  final BarcodeCodabarStartStop stop;
+
+  /// Outputs the Start and Stop characters as text under the barcode
+  final bool p
+
+=== code128.dart ===
+--- class Barcode ---
+t 'barcode_operations.dart';
+
+/// Functions available in [BarcodeCode128] used for special purposes
+class BarcodeCode128Fnc {
+  /// FNC1 at the beginning of a bar code indicates a GS1-128 bar code
+  /// available in Code128A, Code128B, and Code128C
+  static const fnc1 = BarcodeMaps.code128FNC1String;
+
+  /// Function 2 available in Code128A and Code128B
+  static const fnc2 = BarcodeMaps.code128FNC2String;
+
+  /// Function 3 available in Code128A and Code128B
+  static const fnc3 = BarcodeMaps.code1
+
+=== code39.dart ===
+--- class Barcode ---
+sed for both start and stop
+/// delimiters. This can be disabled by setting [drawSpacers] to false.
+class BarcodeCode39 extends Barcode1D {
+  /// Create a code 39 Barcode
+  const BarcodeCode39(this.drawSpacers);
+
+  /// Draw the start '*' and end '*' chars in the left and right margins
+  final bool drawSpacers;
+
+  @override
+  Iterable<int> get charSet => BarcodeMaps.code39.keys;
+
+  @override
+  String get name => 'CODE 39';
+
+  @override
+  Iterable<bool> convert(String data) sync* {
+    yield* add(
+
+=== code93.dart ===
+--- class Barcode ---
+
+///
+/// Code 93 is used primarily by Canada Post to encode supplementary
+/// delivery information.
+class BarcodeCode93 extends Barcode1D {
+  /// Create a Code 93 Barcode
+  const BarcodeCode93();
+
+  @override
+  Iterable<int> get charSet => BarcodeMaps.code93.keys.where((int x) => x > 0);
+
+  @override
+  String get name => 'CODE 93';
+
+  @override
+  Iterable<bool> convert(String data) sync* {
+    // Start
+    yield* add(BarcodeMaps.code93StartStop, BarcodeMaps.code93Len);
+
+    final keys = BarcodeM
+
+=== datamatrix.dart ===
+--- toBytes ---
+g,
+  }) {
+    final encoder = DataMatrixEncoder()..ascii(data);
+    return makeBytes(
+      encoder.toBytes(),
+      width: width,
+      height: height,
+      drawText: drawText,
+      fontHeight: fontHeight,
+      textPadding: textPadding,
+    );
+  }
+
+  @override
+  Barcode2DMatrix convert(Uint8List data) {
+    var text = <int>[...data];
+
+    _CodeSize? size;
+    for (final s in _CodeSize.codeSizes) {
+      if (s.dataCodewords() >= text.length) {
+        size = s;
+        break;
+      }
+    }
+
+ 
+
+--- class Barcode ---
+ "cells" or modules arranged in either a square or rectangular pattern, also
+/// known as a matrix.
+class BarcodeDataMatrix extends Barcode2D {
+  /// Create a [BarcodeDataMatrix] object
+  const BarcodeDataMatrix();
+
+  @override
+  Iterable<BarcodeElement> make(
+    String data, {
+    required double width,
+    required double height,
+    bool drawText = false,
+    double? fontHeight,
+    double? textPadding,
+  }) {
+    final encoder = DataMatrixEncoder()..ascii(data);
+    return makeBytes(
+      
+
+=== ean.dart ===
+--- class Barcode ---
+Article Number or EAN),
+/// a standard describing a barcode symbology and numbering system
+abstract class BarcodeEan extends Barcode1D {
+  /// Create an EAN Barcode
+  const BarcodeEan();
+
+  @override
+  Iterable<int> get charSet =>
+      List<int>.generate(10, (int index) => index + 0x30);
+
+  /// Check the EAN Barcode length and verify the checksum.
+  /// if the checksum is omitted, calculate and append it to the data.
+  @protected
+  String checkLength(String data, int length) {
+    if (data.leng
+
+=== ean13.dart ===
+--- class Barcode ---
+c
+/// retail product type, in a specific packaging configuration,
+/// from a specific manufacturer.
+class BarcodeEan13 extends BarcodeEan {
+  /// Create an EAN 13 Barcode
+  const BarcodeEan13(this.drawEndChar);
+
+  /// Draw the end char '>' in the right margin
+  final bool drawEndChar;
+
+  static const String _finalSpacer = '>';
+
+  @override
+  String get name => 'EAN 13';
+
+  @override
+  int get minLength => 12;
+
+  @override
+  int get maxLength => 13;
+
+  @override
+  void verifyBytes(Uint8List data)
+
+=== ean2.dart ===
+--- class Barcode ---
+ and UPC-A barcodes.
+/// It is often used on magazines and periodicals to indicate an issue number.
+class BarcodeEan2 extends BarcodeEan {
+  /// EAN 2 Barcode
+  const BarcodeEan2();
+
+  @override
+  String get name => 'EAN 2';
+
+  @override
+  int get minLength => 2;
+
+  @override
+  int get maxLength => 2;
+
+  @override
+  Iterable<bool> convert(String data) sync* {
+    verify(data);
+    int idata;
+    try {
+      idata = int.parse(data);
+    } catch (e) {
+      throw BarcodeException('Unable to encode
+
+=== ean5.dart ===
+--- class Barcode ---
+to the EAN-13 barcode used on books. It is used to give a suggestion
+/// for the price of the book.
+class BarcodeEan5 extends BarcodeEan2 {
+  /// EAN 5 Barcode
+  const BarcodeEan5();
+
+  @override
+  String get name => 'EAN 5';
+
+  @override
+  int get minLength => 5;
+
+  @override
+  int get maxLength => 5;
+
+  @override
+  String checkSumModulo10(String data) {
+    var sum = 0;
+    var fak = data.length;
+    for (var c in data.codeUnits) {
+      if (fak % 2 == 0) {
+        sum += (c - 0x30) * 9;
+     
+
+=== ean8.dart ===
+--- class Barcode ---
+ digits of the UPC-A barcode, except that it has 4 digits in
+/// each of the left and right halves.
+class BarcodeEan8 extends BarcodeEan {
+  /// Create an EAN 8 Barcode
+  const BarcodeEan8(this.drawSpacers);
+
+  /// Draw the start '<' and end '>' chars in the left and right margins
+  final bool drawSpacers;
+
+  static const String _startSpacer = '<';
+
+  static const String _finalSpacer = '>';
+
+  @override
+  String get name => 'EAN 8';
+
+  @override
+  int get minLength => 7;
+
+  @override
+  int get m
+
+=== isbn.dart ===
+--- class Barcode ---
+ded to be unique. Publishers purchase ISBNs
+/// from an affiliate of the International ISBN Agency.
+class BarcodeIsbn extends BarcodeEan13 {
+  /// Create an ISBN Barcode
+  const BarcodeIsbn(bool drawEndChar, this.drawIsbn) : super(drawEndChar);
+
+  /// Draw the ISBN number as text on the top of the barcode
+  final bool drawIsbn;
+
+  @override
+  double marginTop(
+    bool drawText,
+    double width,
+    double height,
+    double fontHeight,
+    double textPadding,
+  ) {
+    if (!drawText || !drawIs
+
+=== itf.dart ===
+--- class Barcode ---
+es,
+/// and on cartons of some products, while the products inside are labeled
+/// with UPC or EAN.
+class BarcodeItf extends BarcodeEan {
+  /// Create an ITF-14 Barcode
+  const BarcodeItf(
+    this.addChecksum,
+    this.zeroPrepend,
+    this.drawBorder,
+    this.borderWidth,
+    this.quietWidth,
+    this.fixedLength,
+  ) : assert(fixedLength == null || fixedLength % 2 == 0);
+
+  /// Add Modulo 10 checksum
+  final bool addChecksum;
+
+  /// Prepend with a '0' if the length is not odd
+  final bool ze
+
+=== itf14.dart ===
+--- class Barcode ---
+s of a product, such as a case box of 24 cans of soup.
+/// The ITF-14 will always encode 14 digits.
+class BarcodeItf14 extends BarcodeItf {
+  /// Create an ITF-14 Barcode
+  const BarcodeItf14(
+    bool drawBorder,
+    double? borderWidth,
+    double? quietWidth,
+  ) : super(true, true, drawBorder, borderWidth, quietWidth, 14);
+
+  @override
+  String get name => 'ITF 14';
+
+  @override
+  Iterable<BarcodeElement> makeText(
+    String data,
+    double width,
+    double height,
+    double fontHeight,
+
+
+=== itf16.dart ===
+--- class Barcode ---
+cases, or pallets that contain products. It containins 16 digits, the last
+/// being a check digit.
+class BarcodeItf16 extends BarcodeItf {
+  /// Create an ITF-16 Barcode
+  const BarcodeItf16(
+    bool drawBorder,
+    double? borderWidth,
+    double? quietWidth,
+  ) : super(true, true, drawBorder, borderWidth, quietWidth, 16);
+
+  @override
+  String get name => 'ITF 16';
+
+  @override
+  Iterable<BarcodeElement> makeText(
+    String data,
+    double width,
+    double height,
+    double fontHeight,
+
+
+=== pdf417.dart ===
+--- class Barcode ---
+in a variety of applications
+/// such as transport, identification cards, and inventory management.
+class BarcodePDF417 extends Barcode2D {
+  /// Create a [BarcodePDF417] object
+  const BarcodePDF417(
+      this.securityLevel, this.moduleHeight, this.preferredRatio);
+
+  static const _minCols = 2;
+  static const _maxCols = 60;
+  static const _maxRows = 60;
+  static const _minRows = 2;
+
+  /// Height of the bars
+  final double moduleHeight;
+
+  /// width to height ratio
+  final double preferredRatio
+
+=== postnet.dart ===
+--- class Barcode ---
+e) is a barcode symbology used by
+/// the United States Postal Service to assist in directing mail.
+class BarcodePostnet extends BarcodeHM {
+  /// Create a POSTNET Barcode
+  const BarcodePostnet() : super(tracker: 0);
+
+  @override
+  Iterable<int> get charSet => [45, ...BarcodeMaps.postnet.keys];
+
+  @override
+  String get name => 'POSTNET';
+
+  @override
+  Iterable<BarcodeHMBar> convertHM(String data) sync* {
+    yield fromBits(BarcodeMaps.postnetStartStop);
+
+    var sum = 0;
+    for (final codeUn
+
+=== qrcode.dart ===
+--- class Barcode ---
+rcode (or two-dimensional barcode) first designed in 1994
+/// for the automotive industry in Japan.
+class BarcodeQR extends Barcode2D {
+  /// Create a [BarcodeQR] object
+  const BarcodeQR(
+    this.typeNumber,
+    this.errorCorrectLevel,
+  ) : assert(typeNumber == null || (typeNumber >= 1 && typeNumber <= 40));
+
+  /// QR code version number 1 to 40
+  final int? typeNumber;
+
+  /// The QR Code Correction Level
+  final BarcodeQRCorrectionLevel errorCorrectLevel;
+
+  @override
+  Barcode2DMatrix conve
+
+=== rm4scc.dart ===
+--- class Barcode ---
+stcodes as well as Delivery Point Suffixes (DPSs) to be easily read by
+/// a machine at high speed.
+class BarcodeRm4scc extends BarcodeHM {
+  /// Create an RM4SCC Barcode
+  const BarcodeRm4scc();
+
+  @override
+  Iterable<int> get charSet => BarcodeMaps.rm4scc.keys;
+
+  @override
+  String get name => 'RM4SCC';
+
+  @override
+  Iterable<BarcodeHMBar> convertHM(String data) sync* {
+    yield fromBits(BarcodeMaps.rm4sccStart);
+
+    var sumTop = 0;
+    var sumBottom = 0;
+    final keys = BarcodeMaps.rm4s
+
+=== telepen.dart ===
+--- class Barcode ---
+g shift characters for code switching, and using
+/// only two different widths for bars and spaces.
+class BarcodeTelepen extends Barcode1D {
+  /// Create a Telepen Barcode
+  const BarcodeTelepen();
+
+  @override
+  Iterable<int> get charSet => Iterable<int>.generate(128);
+
+  @override
+  String get name => 'Telepen';
+
+  @override
+  Iterable<bool> convert(String data) sync* {
+    // Start
+    yield* add(BarcodeMaps.telepenStart, BarcodeMaps.telepenLen);
+
+    var checksum = 0;
+
+    for (var code in d
+
+=== upca.dart ===
+--- class Barcode ---
+ems in stores. UPC consists of 12 numeric
+/// digits that are uniquely assigned to each trade item.
+class BarcodeUpcA extends BarcodeEan {
+  /// Create an UPC-A Barcode
+  const BarcodeUpcA();
+
+  @override
+  String get name => 'UPC A';
+
+  @override
+  int get minLength => 11;
+
+  @override
+  int get maxLength => 12;
+
+  @override
+  void verifyBytes(Uint8List data) {
+    final text = utf8.decoder.convert(data);
+    checkLength(text, maxLength);
+    super.verifyBytes(data);
+  }
+
+  @override
+  Iterable
+
+=== upce.dart ===
+--- class Barcode ---
+ling zeros in the manufacturer code,
+/// and all leading zeros in the product code, are suppressed.
+class BarcodeUpcE extends BarcodeEan {
+  /// Create an UPC-E Barcode
+  const BarcodeUpcE(this.fallback);
+
+  /// Fallback to UPC-A if the code cannot be converted to UPC-E
+  final bool fallback;
+
+  @override
+  String get name => 'UPC E';
+
+  @override
+  int get minLength => 6;
+
+  @override
+  int get maxLength => 12;
+
+  @override
+  void verifyBytes(Uint8List data) {
+    var text = utf8.decoder.conver
