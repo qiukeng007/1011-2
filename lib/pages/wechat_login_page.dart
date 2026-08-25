@@ -346,8 +346,9 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         for (int i = 0; i < 3; i++) {
           await Future.delayed(const Duration(milliseconds: 1000));
           final fresh = await _extractCookies();
-          if (fresh == null || fresh.isEmpty) continue;
-          if (fresh.length <= finalCk.length) continue;
+          if (fresh == null || fresh.isEmpty) break;
+          // Cookie 不再变长说明会话已稳定，无需再等
+          if (fresh.length <= finalCk.length) break;
           final ok2 = await StoreSyncService.validateCookie(
             baseUrl: _norm(widget.baseUrl),
             cookie: fresh,
