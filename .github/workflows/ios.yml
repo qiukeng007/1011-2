@@ -1,4 +1,4 @@
-name: iOS Build v1.0.9
+name: iOS Build v1.0.11
 
 on:
   push:
@@ -8,20 +8,25 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    env:
+      PUB_HOSTED_URL: https://pub.flutter-io.cn
+      FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
+          flutter-version: "3.41.2"
+          cache: true
       - run: flutter pub get
       - run: flutter build ios --release --no-codesign
       - run: |
           mkdir -p Payload
           cp -r build/ios/iphoneos/Runner.app Payload/
-          zip -r -y cash-carry-v1.0.9-ios-unsigned.ipa Payload/
-          ls -la cash-carry-v1.0.9-ios-unsigned.ipa
+          zip -r -y cash-carry-v1.0.11-ios-unsigned.ipa Payload/
+          ls -la cash-carry-v1.0.11-ios-unsigned.ipa
       - uses: actions/upload-artifact@v4
         with:
-          name: cash-carry-v1.0.9-ios-unsigned
-          path: cash-carry-v1.0.9-ios-unsigned.ipa
+          name: cash-carry-v1.0.11-ios-unsigned
+          path: cash-carry-v1.0.11-ios-unsigned.ipa
           retention-days: 3
