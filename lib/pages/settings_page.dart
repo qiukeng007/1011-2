@@ -495,7 +495,8 @@ class _SettingsPageState extends State<SettingsPage> {
       }
     }
     // 3) 完全按本次同步的门店顺序重建列表（不沿用旧顺序），
-    //    避免重新同步后门店排序错乱
+    //    避免重新同步后门店排序错乱；本次未同步到的旧门店保留在末尾，防止丢失
+    final keepIds = uniqueStores.map((s) => s.id).toSet();
     final newConfigs = <StoreConfig>[];
     var added = 0;
     var updated = 0;
@@ -518,6 +519,12 @@ class _SettingsPageState extends State<SettingsPage> {
         '$baseUrl|$account|${s.id}',
         s.id,
       );
+    }
+    // 3.5) 保留本次未同步到的旧门店（提取不全时不丢失）
+    for (final c in _configs) {
+      if (c.storeId.isNotEmpty && !keepIds.contains(c.storeId)) {
+        newConfigs.add(c);
+      }
     }
     // 4) 双保险：再次按门店ID去重
     _configs = _dedupeConfigs(newConfigs);
@@ -664,10 +671,6 @@ class _SettingsPageState extends State<SettingsPage> {
         // 1. 总账号（总店账号卡片）——后台地址统一在此卡片内设置
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-          child: _buildMasterAccountCard(),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
           child: _buildMasterAccountCard(),
         ),
         const SizedBox(height: 8),
