@@ -56,7 +56,6 @@ class _SettingsPageState extends State<SettingsPage> {
   String _serverStatus = '';
   Timer? _autoSaveTimer;
   Timer? _serverCheckTimer;
-  late final _baseUrlCtrl = TextEditingController();
   late final _serverCtrl = TextEditingController();
   late final _suppliersCtrl = TextEditingController();
   // 总账号登录（ID数据管理）
@@ -91,7 +90,6 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _autoSaveTimer?.cancel();
     _serverCheckTimer?.cancel();
-    _baseUrlCtrl.dispose();
     _serverCtrl.dispose();
     _suppliersCtrl.dispose();
     _masterAccountCtrl.dispose();
@@ -140,7 +138,6 @@ class _SettingsPageState extends State<SettingsPage> {
       });
       // 同步控制器
       final baseUrl = await widget.configService.getBaseUrl();
-      _baseUrlCtrl.text = baseUrl;
       _masterBaseUrlCtrl.text = baseUrl;
       final mprefs = await SharedPreferences.getInstance();
       final savedAccount = mprefs.getString('login_account');
@@ -415,6 +412,13 @@ class _SettingsPageState extends State<SettingsPage> {
       if (!storesApplied) {
         await _syncStoresFromMaster();
       }
+      // 登录成功后自动刷新供货商列表（与门店同步一致）
+      final syncedStores = _configs
+          .where((c) => c.enabled && c.storeId.isNotEmpty)
+          .toList();
+      if (syncedStores.isNotEmpty) {
+        await _refreshSuppliersAfterLogin(syncedStores.first);
+      }
     }
   }
 
@@ -490,12 +494,9 @@ class _SettingsPageState extends State<SettingsPage> {
         oldByStoreId[c.storeId] = c;
       }
     }
-    // 3) 移除与本次同步门店ID冲突的旧配置，再按唯一列表重建
-    final keepIds = uniqueStores.map((s) => s.id).toSet();
-    final newConfigs = <StoreConfig>[
-      for (final c in _configs)
-        if (c.storeId.isEmpty || !keepIds.contains(c.storeId)) c,
-    ];
+    // 3) 完全按本次同步的门店顺序重建列表（不沿用旧顺序），
+    //    避免重新同步后门店排序错乱
+    final newConfigs = <StoreConfig>[];
     var added = 0;
     var updated = 0;
     for (final s in uniqueStores) {
@@ -660,29 +661,11 @@ class _SettingsPageState extends State<SettingsPage> {
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
       children: [
-        // 1. 全局后台地址
+        // 1. 总账号（总店账号卡片）——后台地址统一在此卡片内设置
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Card(
-            elevation: 0, color: AppConstants.bgColor,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppConstants.radiusSm)),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: TextField(
-                controller: _baseUrlCtrl,
-                decoration: const InputDecoration(
-                  labelText: '银豹后台地址',
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-                  border: OutlineInputBorder(),
-                ),
-                style: const TextStyle(fontSize: 14),
-                onChanged: (v) => widget.configService.saveBaseUrl(v),
-              ),
-            ),
-          ),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: _buildMasterAccountCard(),
         ),
-        // 1.5 总账号（总店账号卡片）
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: _buildMasterAccountCard(),
@@ -1204,7 +1187,6 @@ class _SettingsPageState extends State<SettingsPage> {
     final norm = AuthService.normalizeUrl(_masterBaseUrlCtrl.text.trim());
     await prefs.setString('server_url', norm);
     await widget.configService.saveBaseUrl(norm);
-    _baseUrlCtrl.text = norm;
   }
 
 
