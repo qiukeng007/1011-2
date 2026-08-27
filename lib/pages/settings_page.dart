@@ -1447,6 +1447,8 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _savePrinters() async {
     await widget.configService.savePrinterConfigs(_printerConfigs);
     await widget.configService.saveProfileConfigs(_activeProfile, _printerConfigs);
+    // 通知首页重新加载打印机配置，否则查询页打印按钮不显示/不更新
+    widget.onConfigChanged?.call();
   }
 
   void _editPrinter(PrinterConfig p) {

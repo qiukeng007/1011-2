@@ -17,6 +17,7 @@ import '../services/query_service.dart';
 import '../services/session_manager.dart';
 import '../services/query_logger.dart';
 import '../services/operation_log_service.dart';
+import 'stock_history_page.dart';
 import '../models/query_log.dart';
 import '../widgets/barcode_icon.dart';
 import '../widgets/crop_page.dart';
@@ -945,6 +946,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   Widget _buildProductInfo(ProductData data, String barcode) {
     final barcodePng = _barcodePng(data.barcode.isNotEmpty ? data.barcode : barcode);
+    final syncPhotoBtn = _buildSyncPhotoButton(data, barcode);
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(
@@ -975,10 +977,23 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                         onTap: () => _copyText(
                             data.barcode.isNotEmpty ? data.barcode : barcode),
                       ),
-                      // 一维码（对应商品条码，便于电脑扫码枪直接扫描）
-                      if (barcodePng != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 6),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                _buildProductImageBox(data, barcode),
+              ],
+            ),
+            // 一维码（条形码图片）与同步照片按钮同一行，按钮右缘与图片框右缘对齐
+            if (barcodePng != null || syncPhotoBtn != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  children: [
+                    if (barcodePng != null) ...[
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerLeft,
                           child: FittedBox(
                             fit: BoxFit.scaleDown,
                             alignment: Alignment.centerLeft,
@@ -988,40 +1003,90 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                             ),
                           ),
                         ),
-                      if (data.supplier.isNotEmpty)
-                        InkWell(
-                          onTap: () => _showSupplierPicker(data, _supplierOverrides[barcode] ?? data.supplier),
-                          borderRadius: BorderRadius.circular(4),
-                          child: Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.business, size: 14, color: Color(0xFF28a745)),
-                                const SizedBox(width: 6),
-                                const Text('供货商：', style: TextStyle(fontSize: 13, color: AppConstants.textSecondary)),
-                                Expanded(
-                                  child: Text(
-                                    _supplierOverrides[barcode] ?? data.supplier,
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF28a745)),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                                const Icon(Icons.edit, size: 13, color: Color(0xFF28a745)),
-                              ],
-                            ),
-                          ),
+                      ),
+                      if (syncPhotoBtn != null) const SizedBox(width: 6),
+                    ] else
+                      const Spacer(),
+                    if (syncPhotoBtn != null) syncPhotoBtn,
+                  ],
+                ),
+              ),
+            if (data.supplier.isNotEmpty)
+              InkWell(
+                onTap: () => _showSupplierPicker(
+                    data, _supplierOverrides[barcode] ?? data.supplier),
+                borderRadius: BorderRadius.circular(4),
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.business,
+                          size: 14, color: Color(0xFF28a745)),
+                      const SizedBox(width: 6),
+                      const Text('供货商：',
+                          style: TextStyle(
+                              fontSize: 13, color: AppConstants.textSecondary)),
+                      Expanded(
+                        child: Text(
+                          _supplierOverrides[barcode] ?? data.supplier,
+                          style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF28a745)),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                      _buildInfoRow(Icons.scale, '单位', data.unit),
-                      // 进价 + 售价同行
-                      if (data.buyPrice != null || data.sellPrice != null)
-                        _buildPriceRow(data.buyPrice, data.sellPrice),
+                      ),
+                      const Icon(Icons.edit,
+                          size: 13, color: Color(0xFF28a745)),
                     ],
                   ),
                 ),
-                const SizedBox(width: 10),
-                _buildProductImageBox(data, barcode),
-              ],
+              ),
+            // 单位行：单位信息 + 右侧变动明细按钮（右缘与图片框右缘对齐）
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.scale,
+                      size: 14, color: AppConstants.textSecondary),
+                  const SizedBox(width: 6),
+                  const Text('单位：',
+                      style: TextStyle(
+                          fontSize: 13, color: AppConstants.textSecondary)),
+                  Expanded(
+                    child: Text(
+                      data.unit,
+                      style: const TextStyle(fontSize: 13),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  SizedBox(
+                    width: 70,
+                    child: OutlinedButton(
+                      onPressed: () => _openStockHistory(data, barcode),
+                      child: const Text('变动明细', style: TextStyle(fontSize: 10)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppConstants.primaryColor,
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(0, 26),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        // 方角造型，与同步照片按钮一致
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                        side: BorderSide(
+                            color: AppConstants.primaryColor
+                                .withValues(alpha: 0.5)),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
+            // 进价 + 售价同行
+            if (data.buyPrice != null || data.sellPrice != null)
+              _buildPriceRow(data.buyPrice, data.sellPrice),
           ],
         ),
       ),
@@ -1034,82 +1099,87 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final hasImage = imageUrl != null &&
         imageUrl.isNotEmpty &&
         !imageUrl.contains('default_200x200');
-    // 多门店且有照片时，图片框下方提供同步按钮，把当前照片同步到全部门店
-    final multiStore = widget.configs.length > 1;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        GestureDetector(
-          onTap: hasImage
-              ? () => _showProductImagePreview(data, barcode)
-              : () => _addProductImage(data, barcode),
-          child: Container(
-            width: 70,
-            height: 70,
-            decoration: BoxDecoration(
-              color: AppConstants.bgColor,
-              borderRadius: BorderRadius.circular(9),
-              border: Border.all(color: AppConstants.dividerColor),
-            ),
-            child: _uploadingProductImage
-                ? const Center(
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                : hasImage
-                    ? _CachedImage(
-                        url: imageUrl!,
-                        width: 70,
-                        height: 70,
-                        decodeWidth: 140,
-                        decodeHeight: 140,
-                      )
-                    : Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.camera_alt, size: 24, color: AppConstants.textSecondary),
-                          const SizedBox(height: 2),
-                          const Text(
-                            '添加图片',
-                            style: TextStyle(fontSize: 9, color: AppConstants.textSecondary),
-                          ),
-                        ],
-                      ),
-          ),
+    return GestureDetector(
+      onTap: hasImage
+          ? () => _showProductImagePreview(data, barcode)
+          : () => _addProductImage(data, barcode),
+      child: Container(
+        width: 70,
+        height: 70,
+        decoration: BoxDecoration(
+          color: AppConstants.bgColor,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: AppConstants.dividerColor),
         ),
-        // 仅多门店、有照片、且存在无照片门店（有同步价值）时显示同步按钮
-        if (multiStore &&
-            hasImage &&
-            _uncheckedImageCheckDone &&
-            _hasStoreImageDiff &&
-            !_imageSyncedToAll) ...[
-          const SizedBox(height: 4),
-          SizedBox(
-            width: 70,
-            child: OutlinedButton(
-              onPressed: _uploadingProductImage
-                  ? null
-                  : () => _syncProductImageToAllStores(data, barcode),
-              child: const Text('同步照片', style: TextStyle(fontSize: 10)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: AppConstants.primaryColor,
-                padding: EdgeInsets.zero,
-                minimumSize: const Size(0, 26),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                // 方角造型，不过分圆润
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(2),
+        child: _uploadingProductImage
+            ? const Center(
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
                 ),
-                side: BorderSide(
-                    color: AppConstants.primaryColor.withValues(alpha: 0.5)),
-              ),
-            ),
+              )
+            : hasImage
+                ? _CachedImage(
+                    url: imageUrl!,
+                    width: 70,
+                    height: 70,
+                    decodeWidth: 140,
+                    decodeHeight: 140,
+                  )
+                : Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.camera_alt,
+                          size: 24, color: AppConstants.textSecondary),
+                      const SizedBox(height: 2),
+                      const Text(
+                        '添加图片',
+                        style: TextStyle(
+                            fontSize: 9, color: AppConstants.textSecondary),
+                      ),
+                    ],
+                  ),
+      ),
+    );
+  }
+
+  /// 同步照片按钮：满足条件（多门店且存在照片差异）时返回按钮，
+  /// 否则返回 null。按钮与条形码图片（一维码）同一行，右缘与图片框右缘对齐。
+  Widget? _buildSyncPhotoButton(ProductData data, String barcode) {
+    final overrideUrl = _productImageOverrides[barcode];
+    final imageUrl = overrideUrl ?? data.imageUrl;
+    final hasImage = imageUrl != null &&
+        imageUrl.isNotEmpty &&
+        !imageUrl.contains('default_200x200');
+    final multiStore = widget.configs.length > 1;
+    if (!multiStore ||
+        !hasImage ||
+        !_uncheckedImageCheckDone ||
+        !_hasStoreImageDiff ||
+        _imageSyncedToAll) {
+      return null;
+    }
+    return SizedBox(
+      width: 70,
+      child: OutlinedButton(
+        onPressed: _uploadingProductImage
+            ? null
+            : () => _syncProductImageToAllStores(data, barcode),
+        child: const Text('同步照片', style: TextStyle(fontSize: 10)),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppConstants.primaryColor,
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(0, 26),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          // 方角造型，不过分圆润
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(2),
           ),
-        ],
-      ],
+          side: BorderSide(
+              color: AppConstants.primaryColor.withValues(alpha: 0.5)),
+        ),
+      ),
     );
   }
 
@@ -1326,6 +1396,26 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     }
   }
 
+  /// 打开库存变动明细页（按勾选门店查询银豹变动记录）
+  void _openStockHistory(ProductData data, String barcode) {
+    final enabledConfigs = widget.configs.where((c) => c.enabled).toList();
+    if (enabledConfigs.isEmpty) {
+      _showBanner('未勾选任何搜索门店', isError: true);
+      return;
+    }
+    final realBarcode = data.barcode.isNotEmpty ? data.barcode : barcode;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => StockHistoryPage(
+          configs: enabledConfigs,
+          queryService: widget.queryService,
+          barcode: realBarcode,
+          productName: _productNameOverrides[_productKey(data)] ?? data.name,
+        ),
+      ),
+    );
+  }
+
   /// 上传图片统一压缩到 500KB 以内
   List<int> _compressImageForUpload(Uint8List bytes) {
     if (bytes.length < 512 * 1024) return bytes; // 已 ≤500KB
@@ -1442,9 +1532,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Flexible(
-                child: Text(
-                  productName.isNotEmpty ? productName : '(未命名商品)',
-                  style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                // 名称过长时自动缩小字体保持单行完整显示，不截断
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    productName.isNotEmpty ? productName : '(未命名商品)',
+                    style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
               const SizedBox(width: 6),
@@ -1457,9 +1552,13 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         if (needTrans && _transCache.containsKey(productName))
           Padding(
             padding: const EdgeInsets.only(top: 2),
-            child: Text(
-              _transCache[productName]!,
-              style: const TextStyle(fontSize: 14, color: Color(0xFFE65100), fontWeight: FontWeight.w500),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _transCache[productName]!,
+                style: const TextStyle(fontSize: 13, color: Color(0xFFE65100), fontWeight: FontWeight.w500),
+              ),
             ),
           ),
       ],

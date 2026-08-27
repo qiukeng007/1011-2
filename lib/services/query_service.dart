@@ -3,6 +3,7 @@ import 'dart:io';
 import '../models/store_config.dart';
 import '../models/product_result.dart';
 import '../models/query_log.dart';
+import '../models/stock_history.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'session_manager.dart';
 import 'query_logger.dart';
@@ -708,6 +709,142 @@ class QueryService {
       bytes.addAll(chunk);
     }
     return utf8.decode(bytes);
+  }
+
+  /// 查询商品库存变动明细（银豹 /Inventory/LoadStockChangeHistory）
+  /// 按门店查询：内部用总账号 storeId（或工号回退）定位门店，cookie 走本地会话
+  Future<StockHistoryResult> fetchStockHistory(
+    StoreConfig store,
+    String barcode, {
+    String? startTime,
+    String? endTime,
+  }) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) {
+      return StockHistoryResult(storeId: '', storeName: store.name, error: '条码为空');
+    }
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) {
+      return StockHistoryResult(storeId: '', storeName: store.name, error: '未登录');
+    }
+    try {
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) {
+        return StockHistoryResult(storeId: '', storeName: store.name, error: '无法获取门店信息');
+      }
+      final params = <String, String>{
+        'userId': userId,
+        'barcode': code,
+        'changeType': 'allStockChange',
+      };
+      if (startTime != null) params['beginDateTime'] = startTime;
+      if (endTime != null) params['endDateTime'] = endTime;
+      final pageData = _encodeForm(params);
+
+      final uri = Uri.parse('$baseUrl/Inventory/LoadStockChangeHistory');
+      final req = await _httpClient.postUrl(uri);
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Accept', 'application/json, text/javascript, */*');
+      req.headers.set('Referer', '$baseUrl/Product/Manage');
+      req.headers.set('Origin', baseUrl);
+      req.headers.set('X-Requested-With', 'XMLHttpRequest');
+      req.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      req.headers.set('Cookie', cookie);
+      req.followRedirects = false;
+      req.write(pageData);
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        return StockHistoryResult(
+            storeId: userId, storeName: store.name, error: 'HTTP ${resp.statusCode}');
+      }
+      final body = await _readBody(resp);
+      Map<String, dynamic> data;
+      try {
+        data = jsonDecode(body) as Map<String, dynamic>;
+      } catch (_) {
+        return StockHistoryResult(
+            storeId: userId, storeName: store.name, error: '响应解析失败');
+      }
+      if (data['successed'] != true) {
+        return StockHistoryResult(
+            storeId: userId,
+            storeName: store.name,
+            error: data['msg']?.toString() ?? '查询失败');
+      }
+      final logs = data['stockChangeLogs'] as List? ?? const [];
+      final records = <StockChangeRecord>[];
+      double? prevStock;
+      for (var i = 0; i < logs.length; i++) {
+        final log = logs[i];
+        if (log is! Map<String, dynamic>) continue;
+        final exactStock = (log['exactStock'] as num?)?.toDouble();
+        final reduce = (log['reduceQuantity'] as num?)?.toDouble() ?? 0;
+        final increment = (log['incrementQuantity'] as num?)?.toDouble() ?? 0;
+        final update = (log['updateQuantity'] as num?)?.toDouble() ?? 0;
+        final remark = log['remark']?.toString() ?? '';
+        final operator =
+            (log['CashierNameNumber'] ?? log['operatorName'] ?? log['operator'] ?? '-')
+                .toString();
+
+        // 计算本次变动数量
+        double? stockChange;
+        if (reduce != 0) {
+          stockChange = -reduce;
+        } else if (increment != 0) {
+          stockChange = increment;
+        } else if (update != 0) {
+          final ct = (log['changeType'] as String? ?? '').toLowerCase();
+          if (ct.contains('sell') || ct.contains('sale')) {
+            stockChange = -update;
+          } else {
+            stockChange = update;
+          }
+        } else if (exactStock != null && prevStock != null) {
+          stockChange = exactStock - prevStock;
+        } else if (exactStock != null) {
+          final prevMatch =
+              RegExp(r'修改前库存[：:]?\s*([\d.]+)').firstMatch(remark);
+          if (prevMatch != null) {
+            final prev = double.tryParse(prevMatch.group(1)!);
+            if (prev != null) stockChange = exactStock - prev;
+          }
+        }
+
+        records.add(StockChangeRecord(
+          index: i + 1,
+          time: log['dateTime']?.toString() ?? '',
+          operator: operator,
+          changeType: _mapStockChangeType(log['changeType']?.toString() ?? ''),
+          stockChange: stockChange,
+          correctedStock: exactStock,
+          remark: remark,
+        ));
+        if (exactStock != null) prevStock = exactStock;
+      }
+      return StockHistoryResult(
+          storeId: userId, storeName: store.name, records: records);
+    } catch (e) {
+      return StockHistoryResult(
+          storeId: '', storeName: store.name, error: '查询异常：$e');
+    }
+  }
+
+  /// 银豹变动类型编码 → 中文
+  String _mapStockChangeType(String code) {
+    switch (code.toLowerCase()) {
+      case 'editstock': return '编辑库存';
+      case 'sale': case 'stocksell': return '商品销售';
+      case 'return': case 'stockreturn': return '客户退货';
+      case 'stockin': return '货流进货';
+      case 'stockout': return '货流调出';
+      case 'loss': return '商品报损';
+      case 'unpack': return '组装拆分';
+      case 'anticheckout': return '反结账';
+      case 'newproduct': return '初始库存';
+      default: return code;
+    }
   }
 
   /// 并发查询所有门店
