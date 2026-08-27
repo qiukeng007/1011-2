@@ -1233,7 +1233,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       final bytes =
           _compressImageForUpload(await File(croppedPath).readAsBytes());
       final r = await _uploadImageToAllStores(
-          data, barcode, bytes, opName, '更新照片');
+          data, barcode, bytes, opName, '更新照片', widget.configs);
       if (!mounted) return;
       if (r.successCount > 0) {
         setState(() {});
@@ -1266,9 +1266,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     List<int> bytes,
     String opName,
     String opDesc,
-  ) async {
+    List<StoreConfig> stores, {
+    bool writeDesc = true,
+  }) async {
     // 所有门店并行上传，静默重试直到成功（最多 5 次，失败自动重试，不中断不打扰）
-    final results = await Future.wait(widget.configs.map((store) async {
+    final results = await Future.wait(stores.map((store) async {
       String? lastErr;
       for (var attempt = 0; attempt < 5; attempt++) {
         if (attempt > 0) {
@@ -1312,10 +1314,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       ProductImageCache.cache(lastUrl, bytes);
     }
 
-    // 同步写入操作记录描述（失败不阻断，只提示）
+    // 写入操作记录描述（仅手动添加照片时写，同步照片跳过以提速；失败不阻断，只提示）
     final descErrors = <String>[];
-    if (successCount > 0) {
-      for (final store in widget.configs) {
+    if (writeDesc && successCount > 0) {
+      for (final store in stores) {
         final err = await widget.queryService.updateProductOperationNote(
           store,
           barcode,
@@ -1347,7 +1349,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       _showBanner('该商品暂无照片可同步', isError: true);
       return;
     }
-    final storeCount = widget.configs.length;
+    final enabledConfigs = widget.configs.where((c) => c.enabled).toList();
+    final storeCount = enabledConfigs.length;
     if (storeCount <= 1) return;
 
     // 完整原图地址（与预览一致：相对路径补全域名、去掉 _200x200 缩略图后缀）
@@ -1355,11 +1358,6 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         rawUrl.startsWith('http') ? rawUrl : 'https://img.pospal.cn$rawUrl';
     final original = full.replaceAll('_200x200', '');
 
-    final opName = await _ensureOperatorName();
-    if (opName == null) {
-      _showBanner('请填写操作员姓名后再同步照片', isError: true);
-      return;
-    }
     if (!mounted) return;
 
     setState(() => _uploadingProductImage = true);
@@ -1370,7 +1368,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         return;
       }
       final r = await _uploadImageToAllStores(
-          data, barcode, bytes, opName, '同步照片');
+          data, barcode, bytes, '', '同步照片', enabledConfigs,
+          writeDesc: false);
       if (!mounted) return;
       if (r.successCount > 0) {
         setState(() {
@@ -1382,10 +1381,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         final baseMsg = r.successCount == storeCount
             ? '照片已同步到全部门店 ✓（$storeCount 个门店）'
             : '部分门店同步成功（${r.successCount}/$storeCount）：${r.failedStores.join('；')}';
-        _showBanner(r.descErrors.isEmpty
-            ? baseMsg
-            : '$baseMsg；描述未写入：${r.descErrors.join('；')}',
-            isError: r.descErrors.isNotEmpty);
+        _showBanner(baseMsg);
       } else {
         _showBanner('照片同步失败：${r.failedStores.join('；')}', isError: true);
       }
@@ -2234,7 +2230,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           delta: _getDelta(key),
           btnType: _getBtnType(key),
           disabled: !entry.ok || entry.data == null,
-          onTap: () => _onTransferTap(key),
+          showButton: keys.length > 1,
+          onTap: keys.length > 1 ? () => _onTransferTap(key) : null,
           onDoubleTap: () => _startEditStock(key),
           isEditing: _editStockKey == key,
           stockController: _editStockKey == key ? _editStockController : null,

@@ -170,6 +170,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     try {
       final data = args.isNotEmpty ? args[0] as String : '';
       if (_isOAuthPage(data)) return;
+      if (_isAuthPage(data)) _injectFill();
       _tryLogin(currentUrl: data);
     } catch (_) {}
   }
@@ -205,13 +206,29 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     await _ctrl!.evaluateJavascript(source: '''
       (function(){
         if(window.__cashcarry_filled) return;
-        var emp=document.querySelector('span[data-type="2"]');if(emp)emp.click();
-        setTimeout(function(){
+        // 切到「工号登录」tab：优先 span[data-type="2"]，找不到再按文本匹配
+        var emp=document.querySelector('span[data-type="2"]');
+        if(emp){emp.click();}
+        else{
+          var nodes=document.querySelectorAll('span,li,a,div,label');
+          for(var i=0;i<nodes.length;i++){
+            var t=(nodes[i].textContent||'').trim();
+            if(t==='工号登录'||t==='工号'||(t.indexOf('工号')>=0&&t.length<=6)){
+              nodes[i].click();
+              break;
+            }
+          }
+        }
+        // 轮询等待登录表单渲染完成后自动填充并提交（最多 10 次 × 500ms）
+        var tryFill=function(times){
           var pw=document.querySelectorAll('input[type="password"]');
-          if(pw.length===0) return;
-          window.__cashcarry_filled=true;
           var a=document.getElementById('txt_userName')||document.querySelector('input[placeholder*="账号"]');
-          if(a && $accountJs !== ''){a.value=$accountJs;a.dispatchEvent(new Event('input',{bubbles:true}));a.dispatchEvent(new Event('change',{bubbles:true}));}
+          if(pw.length===0||!a){
+            if(times<10) setTimeout(function(){tryFill(times+1);},500);
+            return;
+          }
+          window.__cashcarry_filled=true;
+          if($accountJs !== ''){a.value=$accountJs;a.dispatchEvent(new Event('input',{bubbles:true}));a.dispatchEvent(new Event('change',{bubbles:true}));}
           var j=document.getElementById('txt_cashierJobName');
           if(j && $employeeJs !== ''){j.value=$employeeJs;j.dispatchEvent(new Event('input',{bubbles:true}));j.dispatchEvent(new Event('change',{bubbles:true}));}
           for(var i=0;i<pw.length;i++){pw[i].value=$passwordJs;pw[i].dispatchEvent(new Event('input',{bubbles:true}));pw[i].dispatchEvent(new Event('change',{bubbles:true}));}
@@ -219,7 +236,8 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
             var btn=document.querySelector('button[type="submit"]')||document.querySelector('input[type="submit"]')||document.querySelector('button.btn-primary')||document.querySelector('a.btn-primary')||document.querySelector('button[class*="login"]')||document.querySelector('button[class*="submit"]')||document.querySelector('a[class*="login"]');
             if(btn)btn.click();else{var fs=document.querySelectorAll('form');for(var f=0;f<fs.length;f++)try{fs[f].submit()}catch(e){}}
           },400);
-        },500);
+        };
+        setTimeout(function(){tryFill(0);},400);
       })();
     ''');
   }
@@ -387,6 +405,25 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       widget.onLoggedIn(finalCk);
       _loggedIn = true;
       await _diag('登录成功，Cookie ${finalCk.length} 字符，提取门店 ${stores.length}个');
+
+      // 登录成功后确保停留在商品资料页：若当前不在（如停在 OAuth 中间页/登录页），
+      // 主动导航到 /Product/Manage 并等待加载完成，再重新提取门店（模仿 smart_eye_stock）
+      if (_ctrl != null) {
+        String cur = '';
+        try {
+          cur = (await _ctrl!.getUrl())?.toString() ?? '';
+        } catch (_) {}
+        if (!cur.contains('/Product/Manage') && !cur.contains('/product/manage')) {
+          await _diag('当前不在商品资料页，主动导航后重新提取门店');
+          await _ctrl!.loadUrl(urlRequest: URLRequest(
+              url: WebUri('${_norm(widget.baseUrl)}/Product/Manage')));
+          await Future.delayed(const Duration(seconds: 3));
+          if (!mounted) return;
+          if (!_storesLoaded) {
+            stores = await _extractStores(finalCk);
+          }
+        }
+      }
 
       if (!_storesLoaded && stores.isNotEmpty) {
         _storesLoaded = true;

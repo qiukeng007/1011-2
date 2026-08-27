@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/store_config.dart';
 import '../models/stock_history.dart';
 import '../services/query_service.dart';
@@ -34,12 +35,51 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
   // 快捷日期选项（选择自定义后 _selectedDays = -1）
   static const _dayOptions = [7, 30, 90];
 
+  // 上次选择的时间范围持久化（下次进入自动沿用）
+  static const _prefsDaysKey = 'stock_history_days';
+  static const _prefsCustomStartKey = 'stock_history_custom_start';
+  static const _prefsCustomEndKey = 'stock_history_custom_end';
+
   String _rangeLabel(int days) => days == 0 ? '全部' : '$days天';
 
   @override
   void initState() {
     super.initState();
+    _loadSavedRange();
+  }
+
+  /// 读取上次选择的时间范围，读完后自动查询
+  Future<void> _loadSavedRange() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedDays = prefs.getInt(_prefsDaysKey);
+      if (savedDays != null &&
+          (savedDays == -1 || savedDays == 0 || _dayOptions.contains(savedDays))) {
+        _selectedDays = savedDays;
+      }
+      if (_selectedDays == -1) {
+        final s = prefs.getString(_prefsCustomStartKey);
+        final e = prefs.getString(_prefsCustomEndKey);
+        if (s != null) _customStart = DateTime.tryParse(s);
+        if (e != null) _customEnd = DateTime.tryParse(e);
+      }
+    } catch (_) {}
+    if (!mounted) return;
     _search();
+  }
+
+  /// 保存当前选择的时间范围
+  Future<void> _saveRange() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_prefsDaysKey, _selectedDays);
+      if (_selectedDays == -1) {
+        await prefs.setString(
+            _prefsCustomStartKey, _customStart?.toIso8601String() ?? '');
+        await prefs.setString(
+            _prefsCustomEndKey, _customEnd?.toIso8601String() ?? '');
+      }
+    } catch (_) {}
   }
 
   String _fmt(DateTime dt, String time) =>
@@ -115,6 +155,7 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
       _customEnd = DateTime(range.end.year, range.end.month, range.end.day);
       _selectedDays = -1;
     });
+    _saveRange();
     _search();
   }
 
@@ -147,6 +188,7 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
                             ? null
                             : (_) {
                                 setState(() => _selectedDays = d);
+                                _saveRange();
                                 _search();
                               },
                         visualDensity: VisualDensity.compact,

@@ -16,6 +16,7 @@ class TransferStoreCard extends StatefulWidget {
   final bool isEditing;
   final TextEditingController? stockController;
   final VoidCallback? onEditConfirm;
+  final bool showButton;
 
   const TransferStoreCard({
     super.key,
@@ -29,6 +30,7 @@ class TransferStoreCard extends StatefulWidget {
     this.isEditing = false,
     this.stockController,
     this.onEditConfirm,
+    this.showButton = true,
   });
 
   @override
@@ -140,6 +142,8 @@ class _TransferStoreCardState extends State<TransferStoreCard> {
     if (isEditing) {
       return _circleBtn('✓', Colors.white, AppConstants.primaryColor, widget.onEditConfirm);
     }
+    // 单门店时无调货意义，不显示按钮
+    if (!widget.showButton) return const SizedBox.shrink();
     switch (widget.btnType) {
       case TransferBtnType.add:
         return _circleBtn('+', Colors.white, widget.disabled ? Colors.grey.shade300 : AppConstants.primaryColor, widget.onTap);
