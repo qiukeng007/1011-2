@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import '../models/store_config.dart';
 import '../models/product_result.dart';
 import '../models/query_log.dart';
@@ -789,18 +790,21 @@ class QueryService {
                 .toString();
 
         // 计算本次变动数量
+        // 银豹部分出库类型（如货流调出 stockout）只返回 incrementQuantity，
+        // 方向需按 changeType 判定，否则会显示成 +N 而实际是 -N
+        final ct = (log['changeType'] as String? ?? '').toLowerCase();
+        const reduceTypes = {
+          'sale', 'sell', 'stocksell', 'stockout', 'loss', 'anticheckout',
+        };
+        final isReduceType =
+            reduceTypes.contains(ct) || ct.contains('sell') || ct.contains('sale');
         double? stockChange;
         if (reduce != 0) {
           stockChange = -reduce;
         } else if (increment != 0) {
-          stockChange = increment;
+          stockChange = isReduceType ? -increment : increment;
         } else if (update != 0) {
-          final ct = (log['changeType'] as String? ?? '').toLowerCase();
-          if (ct.contains('sell') || ct.contains('sale')) {
-            stockChange = -update;
-          } else {
-            stockChange = update;
-          }
+          stockChange = isReduceType ? -update : update;
         } else if (exactStock != null && prevStock != null) {
           stockChange = exactStock - prevStock;
         } else if (exactStock != null) {
@@ -923,6 +927,279 @@ class QueryService {
       );
     }
   }
+
+  /// 银豹调货：创建货流调出单（数量加减，自动生成货单号）
+  ///
+  /// 与直接修改库存不同，调货在银豹变动记录中体现为
+  /// 「货流调出 -N」（调出门店）和「货流进货 +N」（调入门店）。
+  ///
+  /// 返回 null 表示成功，否则返回错误信息。
+  Future<String?> transferStock(
+    StoreConfig fromStore,
+    StoreConfig toStore,
+    String barcode,
+    int quantity,
+  ) async {
+    final baseUrl = fromStore.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return '条码为空';
+    if (quantity <= 0) return '调货数量必须大于0';
+
+    final cookie = await _sessionManager.getCookie(fromStore.storeKey);
+    if (cookie == null || cookie.isEmpty) return '未登录';
+
+    try {
+      final fromUserId = await _resolveStoreUserId(fromStore, cookie);
+      if (fromUserId == null) return '无法获取调出门店信息';
+      final toUserId = toStore.storeId;
+      if (toUserId.isEmpty) return '无法获取调入门店信息';
+
+      // 19位 uid：13位毫秒时间戳 + 6位随机数字
+      final uid19 = StringBuffer(
+          DateTime.now().millisecondsSinceEpoch.toString());
+      final random = Random();
+      for (var i = 0; i < 6; i++) {
+        uid19.write(random.nextInt(10));
+      }
+
+      final order = <String, dynamic>{
+        'stockflowTypeNumber': '13',
+        'fromUserId': fromUserId,
+        'toUserId': toUserId,
+        'items': [
+          {'barcode': code, 'quantity': quantity.toString()},
+        ],
+        'rationPriceType': '3',
+        'remarks': '',
+        'needCorfirm': '0',
+        'nextNeedCorfirm': '0',
+        'uid': uid19.toString(),
+      };
+      final body = 'stockOrderJson=${Uri.encodeComponent(jsonEncode(order))}';
+
+      final uri = Uri.parse('$baseUrl/StockFlow/CreateStockFlowOut');
+      final req = await _httpClient.postUrl(uri);
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Accept', 'application/json, text/javascript, */*');
+      req.headers.set('Referer', '$baseUrl/StockFlow/StockFlowList');
+      req.headers.set('Origin', baseUrl);
+      req.headers.set('X-Requested-With', 'XMLHttpRequest');
+      req.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      req.headers.set('Cookie', cookie);
+      req.followRedirects = false;
+      req.write(body);
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final respBody = await _readBody(resp);
+
+      if (resp.statusCode != 200) {
+        return '调货失败 (HTTP ${resp.statusCode})';
+      }
+      Map<String, dynamic> data;
+      try {
+        data = jsonDecode(respBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '调货返回格式异常';
+      }
+      if (data['successed'] == true) {
+        final sn = data['sn']?.toString() ?? '';
+        // 银豹调货分两步：调出单创建后（调出门店 -N），
+        // 调入门店还需确认收货（ConfirmStockFlowIn）库存才会 +N
+        if (sn.isNotEmpty) {
+          // 创建响应里若能直接拿到调货单 id，优先使用，避免查询列表失败
+          final directFlowId = (data['flowId'] ??
+                  data['stockFlowId'] ??
+                  data['id'] ??
+                  data['stockFlowIdValue'] ??
+                  '')
+              .toString();
+          final confirmErr = await _confirmStockFlowIn(
+            toStore,
+            fromStore,
+            sn,
+            directFlowId: directFlowId,
+          );
+          if (confirmErr != null) {
+            return '调出成功（货单 $sn），确认收货失败：$confirmErr；'
+                '创建响应：${jsonEncode(data)}';
+          }
+        }
+        return null;
+      }
+      final msg = data['message'] ?? data['msg'] ?? '';
+      return msg.toString().isNotEmpty ? '调货失败：$msg' : '调货失败';
+    } catch (e) {
+      return '调货异常：$e';
+    }
+  }
+
+  /// 调入门店确认收货：按货单号查询调货单 id 后调用 ConfirmStockFlowIn
+  /// 返回 null 表示成功，否则返回错误信息
+  Future<String?> _confirmStockFlowIn(
+    StoreConfig toStore,
+    StoreConfig fromStore,
+    String sn, {
+    String directFlowId = '',
+  }) async {
+    final baseUrl = toStore.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final cookie = await _sessionManager.getCookie(toStore.storeKey);
+    if (cookie == null || cookie.isEmpty) return '未登录';
+    final toUserId = await _resolveStoreUserId(toStore, cookie);
+    if (toUserId == null) return '无法获取调入门店信息';
+    try {
+      // 1. 定位调货单 id：查询门店货单列表按单号匹配（同时读取单据状态），
+      //    查询失败时兜底使用创建响应中的 id
+      String? flowId;
+      String rowState = '';
+      String lastListBody = '';
+      // 银豹货单查询要求日期参数非空且格式与网页版一致：
+      // YYYY.MM.DD HH:mm:ss（空格分隔，表单编码后为 %20）
+      String fmtDate(DateTime dt) {
+        String p2(int v) => v.toString().padLeft(2, '0');
+        return '${dt.year}.${p2(dt.month)}.${p2(dt.day)}'
+            ' ${p2(dt.hour)}:${p2(dt.minute)}:${p2(dt.second)}';
+      }
+
+      final now = DateTime.now();
+      final beginTime = fmtDate(now.subtract(const Duration(days: 7)));
+      final endTime = fmtDate(now.add(const Duration(days: 1)));
+      // 先查调入（收货）方列表，找不到再查调出方列表兜底
+      for (final store in [toStore, fromStore]) {
+        final storeCookie = await _sessionManager.getCookie(store.storeKey);
+        if (storeCookie == null || storeCookie.isEmpty) continue;
+        final storeUserId = await _resolveStoreUserId(store, storeCookie);
+        if (storeUserId == null) continue;
+        final params = <String, String>{
+          'userId': storeUserId,
+          'stockFlowType': '',
+          'beginTime': beginTime,
+          'endTime': endTime,
+          'stockFlowState': '',
+          'supplierUid': '',
+          'cashierUid': '',
+          'timeType': '0',
+          'sn': '',
+          'pageIndex': '1',
+          'pageSize': '1000',
+          'orderColumn': '',
+          'asc': 'false',
+        };
+        final listUri = Uri.parse('$baseUrl/StockFlow/LoadStockFlowByPage');
+        final listReq = await _httpClient.postUrl(listUri);
+        // 与银豹网页版请求保持一致：仅 Content-Type + Cookie
+        listReq.headers.set('Content-Type',
+            'application/x-www-form-urlencoded; charset=UTF-8');
+        listReq.headers.set('Cookie', storeCookie);
+        listReq.followRedirects = false;
+        listReq.write(_encodeForm(params));
+        final listResp =
+            await listReq.close().timeout(const Duration(seconds: 15));
+        final listBody = await _readBody(listResp);
+        lastListBody = listBody;
+        if (listResp.statusCode != 200) {
+          final snippet = listBody.length > 300
+              ? listBody.substring(0, 300)
+              : listBody;
+          return '查询货单失败 (HTTP ${listResp.statusCode})：$snippet';
+        }
+        Map<String, dynamic> listData;
+        try {
+          listData = jsonDecode(listBody) as Map<String, dynamic>;
+        } catch (_) {
+          final snippet = listBody.length > 400
+              ? listBody.substring(0, 400)
+              : listBody;
+          return '查询货单返回格式异常：$snippet';
+        }
+        if (listData['successed'] != true) {
+          final snippet = listBody.length > 400
+              ? listBody.substring(0, 400)
+              : listBody;
+          return '查询货单未成功：${listData['msg'] ?? ''}；响应：$snippet';
+        }
+        final contentView = listData['contentView']?.toString() ?? '';
+        final flowIdRegex =
+            RegExp(r'<tr[^>]*\bdata="(\d+)"[^>]*>(.*?)</tr>',
+                dotAll: true);
+        for (final m in flowIdRegex.allMatches(contentView)) {
+          final row = m.group(2) ?? '';
+          if (row.contains(sn)) {
+            flowId = m.group(1);
+            rowState = row;
+            break;
+          }
+        }
+        if (flowId != null) break;
+      }
+      if (flowId == null && directFlowId.isNotEmpty) {
+        flowId = directFlowId;
+      }
+      if (flowId == null) {
+        final snippet = lastListBody.length > 400
+            ? lastListBody.substring(0, 400)
+            : lastListBody;
+        return '未找到货单 $sn（已尝试调入方与调出方门店的货单列表）；'
+            '列表响应：$snippet';
+      }
+
+      // 2. 创建时若已自动完成收货（nextNeedCorfirm=0，即网页版「提交完成」），
+      //    无需再调用确认接口，直接视为成功
+      if (rowState.contains('已完成收货')) {
+        return null;
+      }
+
+      // 3. 确认收货（调入单 id 与货流单 id 相邻，+1 取调入单）
+      final stockFlowId = (int.tryParse(flowId) ?? 0) + 1;
+      final confirmUri = Uri.parse('$baseUrl/StockFlow/ConfirmStockFlowIn');
+      final confirmReq = await _httpClient.postUrl(confirmUri);
+      confirmReq.headers.set('User-Agent', _ua);
+      confirmReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      confirmReq.headers.set('Referer', '$baseUrl/StockFlow/StockFlowList');
+      confirmReq.headers.set('Origin', baseUrl);
+      confirmReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      confirmReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      confirmReq.headers.set('Cookie', cookie);
+      confirmReq.followRedirects = false;
+      confirmReq.write('stockFlowId=$stockFlowId');
+      final confirmResp =
+          await confirmReq.close().timeout(const Duration(seconds: 15));
+      final confirmBody = await _readBody(confirmResp);
+      if (confirmResp.statusCode != 200) {
+        final snippet = confirmBody.length > 400
+            ? confirmBody.substring(0, 400)
+            : confirmBody;
+        return '确认收货失败 (HTTP ${confirmResp.statusCode})：$snippet';
+      }
+      Map<String, dynamic> confirmData;
+      try {
+        confirmData = jsonDecode(confirmBody) as Map<String, dynamic>;
+      } catch (_) {
+        final snippet = confirmBody.length > 400
+            ? confirmBody.substring(0, 400)
+            : confirmBody;
+        return '确认收货返回格式异常：$snippet';
+      }
+      if (confirmData['successed'] == true) {
+        return null;
+      }
+      final msg = confirmData['message'] ?? confirmData['msg'] ?? '';
+      if (msg.toString().contains('无权操作')) {
+        return '无权操作：总部账号无法直接代老店确认收货。'
+            '调出单已创建，若老店已开启自动接收，其收银端上线后会自动确认收货；'
+            '也可在老店后台手动确认。';
+      }
+      final snippet = confirmBody.length > 400
+          ? confirmBody.substring(0, 400)
+          : confirmBody;
+      return msg.toString().isNotEmpty
+          ? '$msg；响应：$snippet'
+          : '确认收货未成功；响应：$snippet';
+    } catch (e) {
+      return '确认收货异常：$e';
+    }
+  }
+
 
   /// 修改商品库存
   ///

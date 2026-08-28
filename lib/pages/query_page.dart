@@ -145,8 +145,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final overlay = OverlayEntry(
       builder: (ctx) => Positioned.fill(
         child: Container(
-          color: Colors.black.withValues(alpha: 0.25),
-          alignment: Alignment.center,
+          color: Colors.black.withValues(alpha: 0.12),
+          alignment: const Alignment(0, 0.62),
           child: Card(
             elevation: 4,
             shape: RoundedRectangleBorder(
@@ -656,8 +656,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     if (_uploadingProductImage)
       Positioned.fill(
         child: ColoredBox(
-          color: Colors.black.withValues(alpha: 0.35),
-          child: Center(
+          color: Colors.black.withValues(alpha: 0.12),
+          child: Align(
+            alignment: const Alignment(0, 0.62),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
               decoration: BoxDecoration(
@@ -2524,7 +2525,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       _showBanner('请填写操作员姓名后再更新供货商', isError: true);
       return;
     }
-    _showBanner('正在同步供货商…');
+    final hideLoading = _showBlockingLoading('正在同步供货商…');
     final errors = <String>[];
     var syncedCount = 0;
     for (final store in widget.configs) {
@@ -2544,6 +2545,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         errors.add('${store.name}：$e');
       }
     }
+    hideLoading();
     if (!mounted) return;
     setState(() => _supplierOverrides[barcode] = newSupplier);
     if (errors.isEmpty) {
@@ -2808,24 +2810,18 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
     setState(() => _querying = true);
 
-    // 新库存
-    final targetNew = (targetResult.data?.stock ?? 0) + qty;
-    final sourceNew = (sourceResult.data?.stock ?? 0) - qty;
-
-    // 两个店并发执行，互不阻塞
-    final results = await Future.wait([
-      widget.queryService.updateProductStock(sourceConfig, barcode, sourceNew,
-          productUid: sourceResult.data?.uid?.toString()),
-      widget.queryService.updateProductStock(targetConfig, barcode, targetNew,
-          productUid: targetResult.data?.uid?.toString()),
-    ]);
-    final sourceErr = results[0];
-    final targetErr = results[1];
+    // 银豹调货：走货流调出单（数量加减、生成货单号），不再直接覆盖库存
+    final transferErr = await widget.queryService.transferStock(
+      sourceConfig,
+      targetConfig,
+      barcode,
+      qty,
+    );
 
     if (mounted) {
       setState(() => _querying = false);
 
-      if (sourceErr == null && targetErr == null) {
+      if (transferErr == null) {
         _cancelTransfer();
         _showBanner('调货成功: ${sourceResult.storeName} → ${targetResult.storeName} ($qty件)');
         OperationLogService.add(
@@ -2836,18 +2832,13 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         );
         _query(barcode);
       } else {
-        // 有失败 → 弹窗 + 可分享
+        // 调货失败 → 弹窗 + 可分享
         _showTransferFailDialog(
           barcode: barcode,
           sourceName: sourceResult.storeName,
-          sourceOld: sourceResult.data?.stock ?? 0,
-          sourceNew: sourceNew,
           targetName: targetResult.storeName,
-          targetOld: targetResult.data?.stock ?? 0,
-          targetNew: targetNew,
           qty: qty,
-          sourceErr: sourceErr,
-          targetErr: targetErr,
+          error: transferErr,
         );
       }
     }
@@ -2856,14 +2847,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   void _showTransferFailDialog({
     required String barcode,
     required String sourceName,
-    required double sourceOld,
-    required double sourceNew,
     required String targetName,
-    required double targetOld,
-    required double targetNew,
     required int qty,
-    String? sourceErr,
-    String? targetErr,
+    required String error,
   }) {
     final now = DateTime.now();
     final timeStr = '${now.year}-${now.month.toString().padLeft(2,'0')}-${now.day.toString().padLeft(2,'0')} '
@@ -2875,12 +2861,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     report.writeln('条码: $barcode');
     report.writeln('数量: $qty 件');
     report.writeln('---');
-    report.writeln('调出: $sourceName${sourceErr != null ? "（失败）" : "（成功）"}');
-    report.writeln('  库存 ${_formatStockStr(sourceOld)} → ${_formatStockStr(sourceNew)}');
-    if (sourceErr != null) report.writeln('  错误: $sourceErr');
-    report.writeln('调入: $targetName${targetErr != null ? "（失败）" : "（成功）"}');
-    report.writeln('  库存 ${_formatStockStr(targetOld)} → ${_formatStockStr(targetNew)}');
-    if (targetErr != null) report.writeln('  错误: $targetErr');
+    report.writeln('调出: $sourceName');
+    report.writeln('调入: $targetName');
+    report.writeln('错误: $error');
 
     showDialog(
       context: context,
