@@ -712,6 +712,10 @@ class QueryService {
     return utf8.decode(bytes);
   }
 
+  /// 获取门店会话 Cookie（供详情页 WebView 注入，保持登录状态）
+  Future<String?> getCookie(String storeKey) =>
+      _sessionManager.getCookie(storeKey);
+
   /// 查询商品库存变动明细（银豹 /Inventory/LoadStockChangeHistory）
   /// 按门店查询：内部用总账号 storeId（或工号回退）定位门店，cookie 走本地会话
   Future<StockHistoryResult> fetchStockHistory(
@@ -785,6 +789,14 @@ class QueryService {
         final increment = (log['incrementQuantity'] as num?)?.toDouble() ?? 0;
         final update = (log['updateQuantity'] as num?)?.toDouble() ?? 0;
         final remark = log['remark']?.toString() ?? '';
+        final sn = (log['sn'] ??
+                log['orderSn'] ??
+                log['ticketId'] ??
+                log['orderNo'] ??
+                log['flowId'] ??
+                log['stockFlowId'] ??
+                '')
+            .toString();
         final operator =
             (log['CashierNameNumber'] ?? log['operatorName'] ?? log['operator'] ?? '-')
                 .toString();
@@ -824,11 +836,27 @@ class QueryService {
           stockChange: stockChange,
           correctedStock: exactStock,
           remark: remark,
+          sn: sn.isEmpty ? null : sn,
         ));
         if (exactStock != null) prevStock = exactStock;
       }
+      // 最新记录显示在最上面（银豹接口默认旧记录在前，序号同步反转）
+      final sortedRecords = <StockChangeRecord>[];
+      for (var i = 0; i < records.length; i++) {
+        final rec = records[records.length - 1 - i];
+        sortedRecords.add(StockChangeRecord(
+          index: i + 1,
+          time: rec.time,
+          operator: rec.operator,
+          changeType: rec.changeType,
+          stockChange: rec.stockChange,
+          correctedStock: rec.correctedStock,
+          remark: rec.remark,
+          sn: rec.sn,
+        ));
+      }
       return StockHistoryResult(
-          storeId: userId, storeName: store.name, records: records);
+          storeId: userId, storeName: store.name, records: sortedRecords);
     } catch (e) {
       return StockHistoryResult(
           storeId: '', storeName: store.name, error: '查询异常：$e');

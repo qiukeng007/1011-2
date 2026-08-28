@@ -7,6 +7,7 @@ class StockChangeRecord {
   final double? stockChange;
   final double? correctedStock;
   final String remark;
+  final String? sn;
 
   const StockChangeRecord({
     required this.index,
@@ -16,6 +17,7 @@ class StockChangeRecord {
     this.stockChange,
     this.correctedStock,
     required this.remark,
+    this.sn,
   });
 }
 

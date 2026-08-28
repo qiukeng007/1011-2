@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'detail_webview_page.dart';
 import '../models/store_config.dart';
 import '../models/stock_history.dart';
 import '../services/query_service.dart';
@@ -25,6 +27,8 @@ class StockHistoryPage extends StatefulWidget {
 }
 
 class _StockHistoryPageState extends State<StockHistoryPage> {
+  // 备注链接点击手势（dispose 时统一释放）
+  final List<TapGestureRecognizer> _recognizers = [];
   bool _loading = false;
   String? _error;
   List<StockHistoryResult> _results = [];
@@ -46,6 +50,15 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
   void initState() {
     super.initState();
     _loadSavedRange();
+  }
+
+  @override
+  void dispose() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+    super.dispose();
   }
 
   /// 读取上次选择的时间范围，读完后自动查询
@@ -295,6 +308,8 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
         ),
       );
     }
+    final store = _findStore(r.storeName);
+    final baseUrl = (store?.baseUrl ?? '').replaceAll(RegExp(r'/$'), '');
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -319,52 +334,318 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
                     color: AppConstants.primaryColor.withValues(alpha: 0.7))),
           ]),
         ),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: DataTable(
-            headingRowColor: WidgetStateProperty.all(AppConstants.bgColor),
-            columnSpacing: 8,
-            dataRowMinHeight: 32,
-            dataRowMaxHeight: 44,
-            columns: const [
-              DataColumn(label: Text('#', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-              DataColumn(label: Text('时间', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-              DataColumn(label: Text('类型', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-              DataColumn(label: Text('变动', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-              DataColumn(label: Text('库存', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-              DataColumn(label: Text('操作人', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-              DataColumn(label: Text('备注', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-            ],
-            rows: r.records.map((rec) {
-              final chg = rec.stockChange;
-              final chgText = chg == null
-                  ? '-'
-                  : (chg >= 0 ? '+${_fmtNum(chg)}' : _fmtNum(chg));
-              final chgColor = chg == null
-                  ? AppConstants.textSecondary
-                  : (chg >= 0
-                      ? const Color(0xFF28a745)
-                      : AppConstants.errorColor);
-              return DataRow(cells: [
-                DataCell(Text('${rec.index}', style: const TextStyle(fontSize: 11))),
-                DataCell(Text(rec.time, style: const TextStyle(fontSize: 11))),
-                DataCell(Text(rec.changeType, style: const TextStyle(fontSize: 11))),
-                DataCell(Text(chgText, style: TextStyle(fontSize: 11, color: chgColor, fontWeight: FontWeight.w600))),
-                DataCell(Text(rec.correctedStock == null ? '-' : _fmtNum(rec.correctedStock!), style: const TextStyle(fontSize: 11))),
-                DataCell(Text(rec.operator, style: const TextStyle(fontSize: 11))),
-                DataCell(ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 120),
-                  child: Text(rec.remark.isEmpty ? '-' : rec.remark,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11)),
-                )),
-              ]);
-            }).toList(),
-          ),
+        // 内容区可横向滚动，右侧「详细」按钮列固定不动
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(children: [
+                      _tableCell(_wIndex, '#', isHeader: true),
+                      _tableCell(_wTime, '时间', isHeader: true),
+                      _tableCell(_wType, '类型', isHeader: true),
+                      _tableCell(_wChange, '变动', isHeader: true),
+                      _tableCell(_wStock, '库存', isHeader: true),
+                      _tableCell(_wOperator, '操作人', isHeader: true),
+                      _tableCell(_wRemark, '备注', isHeader: true),
+                    ]),
+                    for (final rec in r.records) _buildHistoryRow(rec, store),
+                  ],
+                ),
+              ),
+            ),
+            // 固定「详细」列（不随内容横向滚动）
+            Container(
+              width: _wAction,
+              decoration: const BoxDecoration(
+                border: Border(
+                  left: BorderSide(color: Color(0xFFBDBDBD)),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _tableCell(_wAction, '操作',
+                      isHeader: true, showLeftBorder: false),
+                  for (final rec in r.records)
+                    _tableCell(
+                      _wAction,
+                      null,
+                      showLeftBorder: false,
+                      child: _detailButton(rec, baseUrl, store),
+                    ),
+                ],
+              ),
+            ),
+          ],
         ),
       ]),
     );
+  }
+
+  // 表格布局参数
+  static const double _rowH = 40;
+  static const double _wIndex = 38;
+  static const double _wTime = 122;
+  static const double _wType = 76;
+  static const double _wChange = 54;
+  static const double _wStock = 58;
+  static const double _wOperator = 80;
+  static const double _wRemark = 150;
+  static const double _wAction = 62;
+  static const Color _gridLine = Color(0xFFE0E0E0);
+
+  /// 表格单元格（固定行高，带网格线）
+  Widget _tableCell(
+    double width,
+    String? text, {
+    bool isHeader = false,
+    bool showLeftBorder = true,
+    TextStyle? style,
+    Widget? child,
+  }) {
+    return Container(
+      width: width,
+      height: _rowH,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      decoration: BoxDecoration(
+        color: isHeader ? AppConstants.bgColor : null,
+        border: Border(
+          left: showLeftBorder
+              ? const BorderSide(color: _gridLine)
+              : BorderSide.none,
+          right: const BorderSide(color: _gridLine),
+          bottom: const BorderSide(color: _gridLine),
+        ),
+      ),
+      child: child ??
+          (text == null
+              ? null
+              : Text(text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: style ??
+                      TextStyle(
+                        fontSize: 11,
+                        fontWeight: isHeader
+                            ? FontWeight.w600
+                            : FontWeight.normal,
+                        color: AppConstants.textPrimary,
+                      ))),
+    );
+  }
+
+  /// 单条变动记录行
+  Widget _buildHistoryRow(StockChangeRecord rec, StoreConfig? store) {
+    final chg = rec.stockChange;
+    final chgText = chg == null
+        ? '-'
+        : (chg >= 0 ? '+${_fmtNum(chg)}' : _fmtNum(chg));
+    final chgColor = chg == null
+        ? AppConstants.textSecondary
+        : (chg >= 0
+            ? const Color(0xFF28a745)
+            : AppConstants.errorColor);
+    return Row(children: [
+      _tableCell(_wIndex, '${rec.index}'),
+      _tableCell(_wTime, rec.time),
+      _tableCell(_wType, rec.changeType),
+      _tableCell(_wChange, chgText,
+          style: TextStyle(
+              fontSize: 11,
+              color: chgColor,
+              fontWeight: FontWeight.w600)),
+      _tableCell(
+          _wStock,
+          rec.correctedStock == null ? '-' : _fmtNum(rec.correctedStock!)),
+      _tableCell(_wOperator, rec.operator),
+      _tableCell(
+        _wRemark,
+        null,
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text.rich(
+            TextSpan(children: _remarkSpans(
+                rec.remark, const TextStyle(fontSize: 11), store)),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  /// 「详细」按钮：打开备注中的详情链接（货流单/销售单等）
+  Widget _detailButton(StockChangeRecord rec, String baseUrl, StoreConfig? store) {
+    final url = _extractDetailUrl(rec, baseUrl, store?.storeId ?? '');
+    if (url == null) {
+      return const Text('无详情',
+          style: TextStyle(
+              fontSize: 11, color: AppConstants.textSecondary));
+    }
+    return GestureDetector(
+      onTap: () => _openDetail(store, url),
+      behavior: HitTestBehavior.opaque,
+      child: const Center(
+        child: Text('详细',
+            style: TextStyle(
+                fontSize: 12,
+                color: Color(0xFF1565C0),
+                fontWeight: FontWeight.w600,
+                decoration: TextDecoration.underline)),
+      ),
+    );
+  }
+
+  /// 从备注/记录提取详情链接：
+  /// 1. 优先解析 URL（Markdown / 裸 URL / HTML，含相对路径）；
+  /// 2. 没有 URL 时用接口返回的单号构造：销售 → 销售单据，其他 → 货流详情；
+  /// 3. 最后尝试从备注里提取各类单号（货单号/销售单号/流水号等）
+  String? _extractDetailUrl(StockChangeRecord rec, String baseUrl, String storeId) {
+    final remark = rec.remark;
+    if (remark.trim().isNotEmpty) {
+      final text = _preprocessRemark(remark);
+      // Markdown 链接（绝对或相对）
+      final mdRe = RegExp(r'\[[^\]]+\]\(([^)]+)\)');
+      for (final m in mdRe.allMatches(text)) {
+        final abs = _absUrl(m.group(1)!.trim(), baseUrl);
+        if (abs != null) return abs;
+      }
+      // 裸 URL（绝对或相对路径）
+      final urlRe = RegExp(
+          r'(https?://[^\s<>"()\[\]]+|/[A-Za-z][^\s<>"()\[\]]*)');
+      for (final m in urlRe.allMatches(text)) {
+        final abs = _absUrl(m.group(1)!.trim(), baseUrl);
+        if (abs != null) return abs;
+      }
+    }
+    // 接口返回的单号/流水号
+    final sn = rec.sn;
+    if (sn != null && sn.isNotEmpty && baseUrl.isNotEmpty) {
+      return _detailUrlFor(rec.changeType, baseUrl, storeId, sn);
+    }
+    // 从备注提取各类单号
+    final numRe = RegExp(
+        r'(?:货单号|销售单号|流水号|单号|订单号|票号|sn)[：:=\s]*(\d{6,})',
+        caseSensitive: false);
+    final nm = numRe.firstMatch(remark);
+    if (nm != null && baseUrl.isNotEmpty) {
+      return _detailUrlFor(rec.changeType, baseUrl, storeId, nm.group(1)!);
+    }
+    return null;
+  }
+
+  /// 按变动类型构造详情地址：
+  /// 货流类 → 货流详情；销售/退货等其他单据 → 销售单据（storeSn=门店ID.流水号）
+  String _detailUrlFor(String changeType, String baseUrl, String storeId, String sn) {
+    if (changeType.contains('货流')) {
+      return '$baseUrl/StockFlow/StockFlowList?sn=$sn';
+    }
+    if (storeId.isNotEmpty) {
+      return '$baseUrl/Report/Tickets?storeSn=$storeId.$sn';
+    }
+    return '$baseUrl/Report/Tickets?sn=$sn';
+  }
+
+  /// 相对路径拼上后台地址；绝对地址原样返回
+  String? _absUrl(String url, String baseUrl) {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    if (url.startsWith('/') && baseUrl.isNotEmpty) {
+      return '$baseUrl$url';
+    }
+    return null;
+  }
+
+  /// 按门店名称查找配置
+  StoreConfig? _findStore(String storeName) {
+    for (final c in widget.configs) {
+      if (c.name == storeName) return c;
+    }
+    return null;
+  }
+
+  /// 把备注文本转成可点击链接的富文本
+  /// 支持 [详细>>](url)（Markdown）、裸 URL、<a href="url">label</a>（HTML）三种格式
+  List<TextSpan> _remarkSpans(String remark, TextStyle baseStyle, StoreConfig? store) {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+    if (remark.trim().isEmpty) {
+      return [TextSpan(text: '-', style: baseStyle)];
+    }
+    final text = _preprocessRemark(remark);
+    final spans = <TextSpan>[];
+    // Markdown 链接 或 裸 URL
+    final re = RegExp(
+        r'\[([^\]]+)\]\((https?://[^)\s]+\))|(https?://[^\s<>"()\[\]]+)');
+    var last = 0;
+    for (final m in re.allMatches(text)) {
+      if (m.start > last) {
+        spans.add(TextSpan(text: text.substring(last, m.start), style: baseStyle));
+      }
+      final label = (m.group(1) ?? m.group(3))!;
+      final url = (m.group(2) ?? m.group(3))!;
+      final recognizer =
+          TapGestureRecognizer()..onTap = () => _openDetail(store, url);
+      _recognizers.add(recognizer);
+      spans.add(TextSpan(
+        text: label,
+        recognizer: recognizer,
+        style: baseStyle.copyWith(
+          color: const Color(0xFF1565C0),
+          decoration: TextDecoration.underline,
+          decorationColor: const Color(0xFF1565C0),
+          fontWeight: FontWeight.w600,
+        ),
+      ));
+      last = m.end;
+    }
+    if (last < text.length) {
+      spans.add(TextSpan(text: text.substring(last), style: baseStyle));
+    }
+    return spans;
+  }
+
+  /// 把 HTML 链接转换成 Markdown 链接，便于统一解析
+  String _preprocessRemark(String remark) {
+    return remark.replaceAllMapped(
+      RegExp(r'<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+          caseSensitive: false),
+      (m) {
+        final label = m.group(2)!
+            .replaceAll(RegExp(r'<[^>]+>'), '')
+            .replaceAll('&gt;', '>')
+            .replaceAll('&lt;', '<')
+            .replaceAll('&amp;', '&');
+        return '[$label](${m.group(1)})';
+      },
+    );
+  }
+
+  /// 在 APP 内打开详情页（WebView 注入门店 Cookie，保持登录状态）
+  Future<void> _openDetail(StoreConfig? store, String url) async {
+    String? cookie;
+    if (store != null) {
+      try {
+        cookie = await widget.queryService.getCookie(store.storeKey);
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DetailWebViewPage(
+        url: url,
+        cookie: cookie,
+        title: '详情',
+      ),
+    ));
   }
 
   String _fmtNum(double v) =>
