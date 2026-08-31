@@ -22,6 +22,9 @@ class ProductData {
   final double? buyPrice;
   final dynamic uid;
 
+  /// 该门店的商品ID（银豹 <tr data="..."> 行ID，同步照片时跳过重新搜索定位）
+  final String? productId;
+
   /// 商品图片URL
   final String? imageUrl;
 
@@ -51,6 +54,7 @@ class ProductData {
     this.sellPrice,
     this.buyPrice,
     this.uid,
+    this.productId,
     this.imageUrl,
     this.multipleMatches,
     this.candidates,
@@ -73,6 +77,7 @@ class ProductData {
     double? sellPrice,
     double? buyPrice,
     dynamic uid,
+    String? productId,
     String? imageUrl,
     int? multipleMatches,
     List<ProductData>? candidates,
@@ -89,6 +94,7 @@ class ProductData {
       sellPrice: sellPrice ?? this.sellPrice,
       buyPrice: buyPrice ?? this.buyPrice,
       uid: uid ?? this.uid,
+      productId: productId ?? this.productId,
       imageUrl: imageUrl ?? this.imageUrl,
       multipleMatches: multipleMatches ?? this.multipleMatches,
       candidates: candidates ?? this.candidates,

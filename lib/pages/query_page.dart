@@ -1284,6 +1284,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             bytes,
             'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg',
             productUid: data.uid?.toString(),
+            productId:
+                widget.queryService.getCachedProductId(store, barcode, data.uid),
           );
           if (err == null && url != null) {
             return (name: store.name, ok: true, url: url, error: null as String?);

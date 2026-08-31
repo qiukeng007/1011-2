@@ -4,6 +4,7 @@ import '../services/config_service.dart';
 import '../services/login_service.dart';
 import '../services/query_service.dart';
 import '../services/restock_service.dart';
+import '../services/offline_queue_service.dart';
 import '../services/session_manager.dart';
 import '../models/printer_config.dart';
 import '../models/restock_prefill_data.dart';
@@ -67,6 +68,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final Set<String> _verifiedKeys = {};
   bool _serverOnline = false;
   Timer? _serverCheckTimer;
+  int _pendingSubmitCount = 0;
+  bool _flushingOffline = false;
 
   RestockPrefillData? _prefillData;
   bool _silentSupplierFetched = false;
@@ -439,13 +442,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _checkServerOnline() async {
+    // 刷新离线待提交记录数量
+    try {
+      final pending = await OfflineQueueService.instance.getPendingCount();
+      if (mounted && pending != _pendingSubmitCount) {
+        setState(() => _pendingSubmitCount = pending);
+      }
+    } catch (_) {}
     String? url = _restockService?.serverUrl;
     if (url == null || url.isEmpty) {
-      // 尝试从配置中获取
-      url = _configService.loadRestockConfig() is RestockConfig ? null : null;
       if (mounted) setState(() => _serverOnline = false);
       return;
     }
+    final wasOnline = _serverOnline;
     // 多路径尝试（大小写都试）
     for (final path in ['/PIC/password.txt', '/pic/password.txt', '/index.esp?query_booking', '/']) {
       try {
@@ -457,11 +466,64 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         client.close();
         if (response.statusCode == 200 || response.statusCode == 302) {
           if (mounted) setState(() => _serverOnline = true);
+          // 服务器由离线恢复为在线 → 自动补提交离线保存的记录
+          if (!wasOnline) {
+            _flushOfflineQueue();
+          }
           return;
         }
       } catch (_) {}
     }
     if (mounted) setState(() => _serverOnline = false);
+  }
+
+  /// 服务器恢复后自动补提交离线队列中的补货/预定记录
+  Future<void> _flushOfflineQueue() async {
+    if (_flushingOffline) return;
+    final service = _restockService;
+    if (service == null) return;
+    _flushingOffline = true;
+    try {
+      final items = await OfflineQueueService.instance.getItems();
+      if (items.isEmpty) return;
+      for (final item in items) {
+        try {
+          final imageBytes = item.imageBase64.isEmpty
+              ? null
+              : base64Decode(item.imageBase64);
+          final ok = item.type == 'booking'
+              ? await service.submitBooking(
+                  shopName: item.shopName,
+                  phone: item.phone,
+                  barcode: item.barcode,
+                  quantity: item.quantity,
+                  desc: item.desc,
+                  imageBytes: imageBytes,
+                  imageName: item.imageName,
+                )
+              : await service.submitReplenish(
+                  shopName: item.shopName,
+                  barcode: item.barcode,
+                  quantity: item.quantity,
+                  desc: item.desc,
+                  imageBytes: imageBytes,
+                  imageName: item.imageName,
+                );
+          if (ok) {
+            await OfflineQueueService.instance.removeItem(item.id);
+          } else {
+            // 服务器在线但补提交仍失败（数据问题等），停止本次，避免重复尝试
+            break;
+          }
+        } catch (_) {
+          break;
+        }
+      }
+    } finally {
+      _flushingOffline = false;
+      final count = await OfflineQueueService.instance.getPendingCount();
+      if (mounted) setState(() => _pendingSubmitCount = count);
+    }
   }
 
   Future<void> _checkAppUpdate(String serverUrl) async {
@@ -803,6 +865,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             color: Colors.white,
                             fontSize: 13,
                           ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          // 离线待提交记录横幅
+          if (_pendingSubmitCount > 0)
+            Positioned(
+              top: _verifying ? 46 : 0,
+              left: 0,
+              right: 0,
+              child: Material(
+                color: const Color(0xFFF57C00).withValues(alpha: 0.95),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.cloud_upload_outlined, size: 18, color: Colors.white),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          '有 $_pendingSubmitCount 条记录待提交，服务器恢复后自动上传',
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
                         ),
                       ),
                     ],

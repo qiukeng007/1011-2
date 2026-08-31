@@ -59,6 +59,9 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   bool _storesLoaded = false;
   bool _pageReady = false;
 
+  /// Dart 侧会话守护定时器：不依赖页面 JS 轮询，周期性验证登录会话是否已生效
+  Timer? _watchTimer;
+
   static const _oauthKeywords = [
     'oauth',
     'wechat',
@@ -162,7 +165,22 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         return;
       }
       _tryLogin(currentUrl: u);
+    } else if (_loggedIn && !_storesLoaded && !_loginAttempting) {
+      // 已登录但当前不在商品资料页（如停在登录页/OAuth 回调页）：
+      // 主动导航回 /Product/Manage，再重新提取门店（模仿 smart_eye_stock）
+      // _tryLogin 正在处理登录/导航时不重复导航，避免双次跳转卡在加载中
+      _navigateBackToProductPage();
     }
+  }
+
+  /// 已登录但当前页面不在商品资料页时，主动导航回去再提取门店
+  Future<void> _navigateBackToProductPage() async {
+    if (_ctrl == null || _storesLoaded) return;
+    await _diag('已登录但不在商品资料页，主动导航回 /Product/Manage');
+    try {
+      await _ctrl!.loadUrl(urlRequest: URLRequest(
+          url: WebUri('${_norm(widget.baseUrl)}/Product/Manage')));
+    } catch (_) {}
   }
 
   void _onJsDetect(List<dynamic> args) {
@@ -173,6 +191,32 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       if (_isAuthPage(data)) _injectFill();
       _tryLogin(currentUrl: data);
     } catch (_) {}
+  }
+
+  /// Dart 侧守护：每3秒检查一次当前页面并验证会话（页面 JS 轮询失效时的兜底），
+  /// 登录成功后自动停止
+  void _startWatchTimer() {
+    _watchTimer?.cancel();
+    _watchTimer = Timer.periodic(const Duration(seconds: 3), (t) async {
+      if (!mounted || _loggedIn) {
+        t.cancel();
+        return;
+      }
+      if (_ctrl == null || !_pageReady) return;
+      try {
+        final cur = (await _ctrl!.getUrl())?.toString() ?? '';
+        if (cur.isEmpty || _isOAuthPage(cur)) return;
+        // 登录页自动填充（防漏：页面 load 事件未触发时也能自动登录）
+        if (_isAuthPage(cur)) _injectFill();
+        await _tryLogin(currentUrl: cur);
+      } catch (_) {}
+    });
+  }
+
+  @override
+  void dispose() {
+    _watchTimer?.cancel();
+    super.dispose();
   }
 
   /// 手动验证（扫码完成后用户点击按钮）
@@ -206,25 +250,39 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     await _ctrl!.evaluateJavascript(source: '''
       (function(){
         if(window.__cashcarry_filled) return;
-        // 切到「工号登录」tab：优先 span[data-type="2"]，找不到再按文本匹配
-        var emp=document.querySelector('span[data-type="2"]');
-        if(emp){emp.click();}
-        else{
+        // 切到「工号登录」tab：优先 span[data-type="2"]，找不到再按文本匹配；
+        // 点击后确认工号输入行可见（银豹 tab 切换会 show 工号输入行），未显示则重试点击
+        var clickEmpTab=function(){
+          var emp=document.querySelector('span[data-type="2"]');
+          if(emp){emp.click();return true;}
           var nodes=document.querySelectorAll('span,li,a,div,label');
           for(var i=0;i<nodes.length;i++){
             var t=(nodes[i].textContent||'').trim();
             if(t==='工号登录'||t==='工号'||(t.indexOf('工号')>=0&&t.length<=6)){
               nodes[i].click();
-              break;
+              return true;
             }
           }
-        }
-        // 轮询等待登录表单渲染完成后自动填充并提交（最多 10 次 × 500ms）
+          return false;
+        };
+        var empRowVisible=function(){
+          var j=document.getElementById('txt_cashierJobName');
+          if(!j) return false;
+          var p=j.parentElement;
+          return p && p.style.display!=='none';
+        };
+        // 轮询等待登录表单渲染完成后自动填充并提交（最多 15 次 × 500ms）
         var tryFill=function(times){
           var pw=document.querySelectorAll('input[type="password"]');
           var a=document.getElementById('txt_userName')||document.querySelector('input[placeholder*="账号"]');
           if(pw.length===0||!a){
-            if(times<10) setTimeout(function(){tryFill(times+1);},500);
+            if(times<15) setTimeout(function(){tryFill(times+1);},500);
+            return;
+          }
+          // 确保已切到工号登录 tab（工号输入行可见才算成功）
+          if(!empRowVisible()){clickEmpTab();}
+          if(!empRowVisible()){
+            if(times<15) setTimeout(function(){tryFill(times+1);},500);
             return;
           }
           window.__cashcarry_filled=true;
@@ -233,10 +291,12 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
           if(j && $employeeJs !== ''){j.value=$employeeJs;j.dispatchEvent(new Event('input',{bubbles:true}));j.dispatchEvent(new Event('change',{bubbles:true}));}
           for(var i=0;i<pw.length;i++){pw[i].value=$passwordJs;pw[i].dispatchEvent(new Event('input',{bubbles:true}));pw[i].dispatchEvent(new Event('change',{bubbles:true}));}
           setTimeout(function(){
-            var btn=document.querySelector('button[type="submit"]')||document.querySelector('input[type="submit"]')||document.querySelector('button.btn-primary')||document.querySelector('a.btn-primary')||document.querySelector('button[class*="login"]')||document.querySelector('button[class*="submit"]')||document.querySelector('a[class*="login"]');
+            // 银豹登录按钮是 div#submitLoginBtn（jQuery 绑定 click），优先点击它
+            var btn=document.getElementById('submitLoginBtn')||document.querySelector('button[type="submit"]')||document.querySelector('input[type="submit"]')||document.querySelector('button.btn-primary')||document.querySelector('a.btn-primary')||document.querySelector('button[class*="login"]')||document.querySelector('button[class*="submit"]')||document.querySelector('a[class*="login"]')||document.querySelector('div.submitLoginBtn');
             if(btn)btn.click();else{var fs=document.querySelectorAll('form');for(var f=0;f<fs.length;f++)try{fs[f].submit()}catch(e){}}
           },400);
         };
+        clickEmpTab();
         setTimeout(function(){tryFill(0);},400);
       })();
     ''');
@@ -261,7 +321,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         if (_ctrl != null) {
           final result = await _ctrl!.evaluateJavascript(
             source: StoreSyncService.jsExtractStores,
-          );
+          ).timeout(const Duration(seconds: 8));
           final raw = result?.toString() ?? 'null';
           final stores = StoreSyncService.parseStoresValue(result);
           await _diag('JS精确提取(第${attempt + 1}次): $raw → ${stores.length}个');
@@ -282,7 +342,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       if (_ctrl != null) {
         final result = await _ctrl!.callAsyncJavaScript(
           functionBody: StoreSyncService.jsExtractStoresPoll,
-        );
+        ).timeout(const Duration(seconds: 10));
         final raw = result?.value?.toString() ?? 'null';
         final stores = StoreSyncService.parseStoresValue(result?.value);
         await _diag('JS宽泛轮询提取: $raw → ${stores.length}个');
@@ -406,18 +466,34 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       _loggedIn = true;
       await _diag('登录成功，Cookie ${finalCk.length} 字符，提取门店 ${stores.length}个');
 
-      // 登录成功后确保停留在商品资料页：若当前不在（如停在 OAuth 中间页/登录页），
-      // 主动导航到 /Product/Manage 并等待加载完成，再重新提取门店（模仿 smart_eye_stock）
+      // 登录成功后确保停留在商品资料页：若当前不在（如停在登录页/OAuth 中间页，
+      // 即使 URL 带 returnUrl 也不算在商品资料页），主动导航到 /Product/Manage 并等待
+      // 页面真正加载完成，再重新提取门店（模仿 smart_eye_stock）
       if (_ctrl != null) {
         String cur = '';
         try {
           cur = (await _ctrl!.getUrl())?.toString() ?? '';
         } catch (_) {}
-        if (!cur.contains('/Product/Manage') && !cur.contains('/product/manage')) {
+        final onProduct = !_isAuthPage(cur) && !_isOAuthPage(cur) &&
+            (cur.contains('/Product/Manage') || cur.contains('/product/manage'));
+        if (!onProduct) {
           await _diag('当前不在商品资料页，主动导航后重新提取门店');
           await _ctrl!.loadUrl(urlRequest: URLRequest(
               url: WebUri('${_norm(widget.baseUrl)}/Product/Manage')));
-          await Future.delayed(const Duration(seconds: 3));
+          // 等待页面真正加载到商品资料页（最多10秒，首次登录网络慢时也能等到）
+          for (int i = 0; i < 20 && !_storesLoaded; i++) {
+            await Future.delayed(const Duration(milliseconds: 500));
+            if (!mounted) return;
+            try {
+              final now = (await _ctrl!.getUrl())?.toString() ?? '';
+              if (now.contains('/Product/Manage') ||
+                  now.contains('/product/manage')) {
+                break;
+              }
+            } catch (_) {
+              break;
+            }
+          }
           if (!mounted) return;
           if (!_storesLoaded) {
             stores = await _extractStores(finalCk);
@@ -429,7 +505,12 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         _storesLoaded = true;
         widget.onStoresLoaded?.call(stores);
       } else if (!_storesLoaded) {
+        // 门店还没提取到：多等一会儿，尽量在弹回配置页前把门店列表拿到
         _scheduleStoreRetry();
+        for (int i = 0; i < 12 && !_storesLoaded; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (!mounted) return;
+        }
       }
 
       if (!mounted) return;
@@ -562,13 +643,10 @@ window.open=function(u,t,f){if(u&&typeof u==="string"&&u!==""&&u!=="about:blank"
     }
 
     if (_checkCount % 5 === 0) {
-      var pwFields = document.querySelectorAll("input[type=\\"password\\"]");
-      var submitBtns = document.querySelectorAll("button[type=\\"submit\\"], input[type=\\"submit\\"]");
-      var hasAuthForm = pwFields.length > 0 && submitBtns.length > 0;
-
-      if (!hasAuthForm && document.cookie.length > 0) {
-        window.flutter_inappwebview.callHandler("onJsDetect", currentUrl);
-      }
+      // 周期性上报当前页面：AJAX 登录成功后登录表单可能仍停留在页面，
+      // 不能只依赖「表单消失 + Cookie 存在」判断（首次登录卡住的关键），
+      // 由 Flutter 侧每次验证会话是否已生效
+      window.flutter_inappwebview.callHandler("onJsDetect", currentUrl);
     }
   }, 1000);
 })();
@@ -682,6 +760,7 @@ window.open=function(u,t,f){if(u&&typeof u==="string"&&u!==""&&u!=="about:blank"
               _ctrl = c;
               _seedAndLoad(c);
               c.addJavaScriptHandler(handlerName: 'onJsDetect', callback: _onJsDetect);
+              _startWatchTimer();
             },
             shouldOverrideUrlLoading: _onUrlOverride,
             onUpdateVisitedHistory: _onUpdateVisitedHistory,

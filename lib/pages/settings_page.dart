@@ -382,6 +382,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final masterKey = '$baseUrl|$account|master';
     // 登录成功后优先使用页面内提取的门店；未取到再走 HTTP 同步
     var storesApplied = false;
+    Future<void>? storesApplyFuture;
     final ok = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => WechatLoginPage(
@@ -395,7 +396,7 @@ class _SettingsPageState extends State<SettingsPage> {
           onStoresLoaded: (stores) {
             if (stores.isNotEmpty) {
               storesApplied = true;
-              _applyStores(stores);
+              storesApplyFuture = _applyStores(stores);
             }
           },
         ),
@@ -409,6 +410,12 @@ class _SettingsPageState extends State<SettingsPage> {
         _masterLoginTime = now;
         _masterLoggedIn = true;
       });
+      // 等待门店列表合并完成，避免下面判断「已同步门店」时 _configs 还没更新
+      if (storesApplyFuture != null) {
+        try {
+          await storesApplyFuture;
+        } catch (_) {}
+      }
       if (!storesApplied) {
         await _syncStoresFromMaster();
       }
