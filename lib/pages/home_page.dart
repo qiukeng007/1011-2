@@ -762,6 +762,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
               ),
             ),
+            // 离线待提交记录数量角标（橙色圈 + 数字）
+            if (_pendingSubmitCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  constraints: const BoxConstraints(minWidth: 17, minHeight: 17),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFF57C00),
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '$_pendingSubmitCount',
+                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
           ],
         ),
         backgroundColor: AppConstants.primaryColor,
@@ -865,31 +883,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             color: Colors.white,
                             fontSize: 13,
                           ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          // 离线待提交记录横幅
-          if (_pendingSubmitCount > 0)
-            Positioned(
-              top: _verifying ? 46 : 0,
-              left: 0,
-              right: 0,
-              child: Material(
-                color: const Color(0xFFF57C00).withValues(alpha: 0.95),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.cloud_upload_outlined, size: 18, color: Colors.white),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          '有 $_pendingSubmitCount 条记录待提交，服务器恢复后自动上传',
-                          style: const TextStyle(color: Colors.white, fontSize: 13),
                         ),
                       ),
                     ],
