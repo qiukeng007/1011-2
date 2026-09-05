@@ -70,4 +70,28 @@ class OperationLogService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_key, '[]');
   }
+
+  /// 收藏条码存储键（按条码收藏，置顶便于后续网页端核对问题条码）
+  static const _favKey = 'favorite_log_barcodes';
+
+  /// 当前收藏的条码集合
+  static Future<Set<String>> getFavoriteBarcodes() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getStringList(_favKey) ?? const []).toSet();
+  }
+
+  /// 切换某条码的收藏状态，返回最新收藏集合
+  static Future<Set<String>> toggleFavoriteBarcode(String barcode) async {
+    final code = barcode.trim();
+    if (code.isEmpty) return <String>{};
+    final prefs = await SharedPreferences.getInstance();
+    final list = (prefs.getStringList(_favKey) ?? const []).toList();
+    if (list.contains(code)) {
+      list.remove(code);
+    } else {
+      list.insert(0, code);
+    }
+    await prefs.setStringList(_favKey, list);
+    return list.toSet();
+  }
 }

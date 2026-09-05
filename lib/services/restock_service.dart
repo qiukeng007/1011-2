@@ -53,7 +53,7 @@ class RestockService {
   Future<bool> submitReplenish({
     required String shopName,
     String barcode = '',
-    required int quantity,
+    required String quantity,
     String desc = '',
     List<int>? imageBytes,
     String? imageName,
@@ -74,7 +74,7 @@ class RestockService {
     String? shopName,
     required String phone,
     String barcode = '',
-    required int quantity,
+    required String quantity,
     required String desc,
     List<int>? imageBytes,
     String? imageName,
@@ -96,7 +96,7 @@ class RestockService {
     required String endpoint,
     required String shopName,
     required String barcode,
-    required int quantity,
+    required String quantity,
     required String desc,
     String? phone,
     List<int>? imageBytes,
@@ -128,7 +128,7 @@ class RestockService {
 
       addField('shopname', shopName.replaceAll('&', ''));
       addField('barcode', barcode.replaceAll('&', ''));
-      addField('quantity', quantity.toString());
+      addField('quantity', quantity);
       addField('desc', desc.replaceAll('&', ''));
       final opName = _config.operatorName.isNotEmpty ? _config.operatorName : '未知操作员';
       addField('Operators', opName);

@@ -8,7 +8,7 @@ class OfflineQueueItem {
   final String type; // replenish / booking
   final String shopName;
   final String barcode;
-  final int quantity;
+  final String quantity;
   final String desc;
   final String phone;
   final String imageBase64;
@@ -34,7 +34,7 @@ class OfflineQueueItem {
       type: json['type'] as String? ?? 'replenish',
       shopName: json['shopName'] as String? ?? '',
       barcode: json['barcode'] as String? ?? '',
-      quantity: json['quantity'] as int? ?? 1,
+      quantity: json['quantity']?.toString() ?? '',
       desc: json['desc'] as String? ?? '',
       phone: json['phone'] as String? ?? '',
       imageBase64: json['imageBase64'] as String? ?? '',

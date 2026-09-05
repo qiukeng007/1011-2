@@ -13,6 +13,7 @@ class RecordsPage extends StatefulWidget {
 
 class _RecordsPageState extends State<RecordsPage> {
   List<OperationLog> _logs = [];
+  Set<String> _favorites = {};
   bool _loading = true;
 
   @override
@@ -23,7 +24,36 @@ class _RecordsPageState extends State<RecordsPage> {
 
   Future<void> _load() async {
     final logs = await OperationLogService.getAll();
-    if (mounted) setState(() { _logs = logs; _loading = false; });
+    final favorites = await OperationLogService.getFavoriteBarcodes();
+    if (mounted) {
+      setState(() {
+        _favorites = favorites;
+        _logs = _sortedLogs(logs, favorites);
+        _loading = false;
+      });
+    }
+  }
+
+  /// 收藏（按条码）的记录置顶，其余保持原有先后顺序
+  List<OperationLog> _sortedLogs(
+      List<OperationLog> logs, Set<String> favorites) {
+    final fav = <OperationLog>[];
+    final rest = <OperationLog>[];
+    for (final log in logs) {
+      (favorites.contains(log.barcode) ? fav : rest).add(log);
+    }
+    return [...fav, ...rest];
+  }
+
+  Future<void> _toggleFavorite(OperationLog log) async {
+    if (log.barcode.isEmpty) return;
+    final updated =
+        await OperationLogService.toggleFavoriteBarcode(log.barcode);
+    if (!mounted) return;
+    setState(() {
+      _favorites = updated;
+      _logs = _sortedLogs(_logs, updated);
+    });
   }
 
   @override
@@ -70,8 +100,10 @@ class _RecordsPageState extends State<RecordsPage> {
                   itemCount: _logs.length,
                   itemBuilder: (_, i) {
                     final log = _logs[i];
+                    final fav = _favorites.contains(log.barcode);
                     return Card(
                       margin: const EdgeInsets.only(bottom: 8),
+                      color: fav ? const Color(0xFFFFF8E1) : null,
                       child: InkWell(
                         onTap: () {
                           Clipboard.setData(ClipboardData(text: log.barcode));
@@ -101,6 +133,21 @@ class _RecordsPageState extends State<RecordsPage> {
                                   child: Text(log.store, style: const TextStyle(fontSize: 10, color: AppConstants.primaryColor)),
                                 ),
                                 const Spacer(),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(
+                                      minWidth: 32, minHeight: 32),
+                                  tooltip: fav ? '取消收藏' : '收藏（置顶）',
+                                  icon: Icon(
+                                    fav ? Icons.star : Icons.star_border,
+                                    size: 20,
+                                    color: fav
+                                        ? Colors.amber
+                                        : AppConstants.textSecondary,
+                                  ),
+                                  onPressed: () => _toggleFavorite(log),
+                                ),
                                 Text(log.time, style: const TextStyle(fontSize: 11, color: AppConstants.textSecondary)),
                               ]),
                               const SizedBox(height: 6),
